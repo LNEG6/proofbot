@@ -370,8 +370,9 @@ Write acceptance checks in the folder {CHECK_DIR}/ of this workspace:
 - Test real behaviour: run the program, call the function, read the output. Only check that a file
   contains something when the task is about that file's text.
 - Prove each rule by exhaustion where the inputs can be listed: define DOMAIN, a dict of input name -> range or
-  list (every option, like each role, status, customer type or flag; for numbers cover negatives, zero and edge
-  values; at most 10 million combinations in all), plus run(**inputs), which
+  list (every option, like each role, status, customer type or flag; for numbers use realistic values, zero and the
+  boundaries that matter, never impossible ones like a negative age or a huge made-up number; at most 10 million
+  combinations in all), plus run(**inputs), which
   calls the code and returns its output, and expected(**inputs), which returns the right output. The harness tries
   every combination and maps every input to its output. expected must work out the answer by itself: it runs without
   the project, so it can't call the code being checked. It returns one answer, never a set of acceptable answers: if the
@@ -611,8 +612,15 @@ def load_decisions(settings):
 
 
 def settled_lines(settings, state):
-    """Everything the person has settled, in this job and in earlier ones, so nobody gets asked twice."""
-    return [entry["said"] for entry in load_decisions(settings) + (state.get("answers") or [])]
+    """Everything people have settled here, so nobody gets asked twice."""
+    return [entry["said"] for entry in load_decisions(settings)]
+
+
+def remember(settings, number, entry):
+    """A person's answer stands from the moment they give it, whatever happens to the job."""
+    keep = {key: entry[key] for key in ("said", "who", "check", "inputs", "output") if key in entry}
+    decisions_path(settings).parent.mkdir(parents=True, exist_ok=True)
+    decisions_path(settings).write_text(json.dumps(load_decisions(settings) + [{"job": number, **keep}], indent=2), encoding="utf-8")
 
 
 def read_meaning(settings, job, state, sealed):
@@ -660,7 +668,7 @@ def find_contradictions(settings, state, sealed):
     answered = {readings.key(entry["inputs"]) for entry in state.get("answers") or [] if entry.get("inputs")}
     for decision in load_decisions(settings):
         inputs = decision.get("inputs")
-        if "output" not in decision or readings.key(inputs) in answered:
+        if "output" not in decision or readings.key(inputs) in answered or decision["job"] == state["job"] or len(found) >= 2:
             continue
         for name, source in sealed:
             text = source.decode("utf-8", "replace").lstrip("\ufeff")
@@ -717,6 +725,7 @@ def answer_question(settings, number, question_id, reply, who="", confirmed=None
     state.setdefault("answers", []).append(entry)
     state["readings"]["questions"] = [item for item in open_questions(state) if item["id"] != question_id]
     save_state(job, state)
+    remember(settings, number, entry)
     return entry
 
 
@@ -1000,13 +1009,8 @@ def finish(settings, number, claim=""):
     if "library_before" in state:
         state["library_added"] = add_to_library(settings, state, job) if state["verdict"].startswith("DONE") else []
         state["assumptions"] = relies_on(state)
-        settled = [{key: entry[key] for key in ("said", "who", "check", "inputs", "output") if key in entry}
-                   for entry in state.get("answers") or []]
-        settled += [{"said": f"Correction: {state['request']}", "who": state.get("who", "")}] if state.get("correction") else []
-        if state["verdict"].startswith("DONE") and settled:  # remembered, so nobody has to say it twice
-            decisions = load_decisions(settings) + [{"job": number, **entry} for entry in settled]
-            decisions_path(settings).parent.mkdir(parents=True, exist_ok=True)
-            decisions_path(settings).write_text(json.dumps(decisions, indent=2), encoding="utf-8")
+        if state["verdict"].startswith("DONE") and state.get("correction"):  # a correction counts once it's proven
+            remember(settings, number, {"said": f"Correction: {state['request']}", "who": state.get("who", "")})
     ledger = settings.home / "ledger.jsonl"
     entries = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()] if ledger.exists() else []
     state["previous"] = entries[-1]["receipt"] if entries else None
@@ -1046,7 +1050,7 @@ def run_job(settings, request, progress=lambda text: None, ask=None, correction=
         state = load_state(job)
         found = state.get("readings") or {}
         if ask and attempt and found.get("conflicts") and found.get("dropped"):  # fixing didn't settle it: ask the person
-            found["questions"], found["dropped"], found["conflicts"] = found["questions"] + found["dropped"], [], []
+            readings.promote(found, len(state.get("answers") or []))
             save_state(job, state)
         questions = open_questions(state) if ask else []
         if questions:
@@ -1062,7 +1066,8 @@ def run_job(settings, request, progress=lambda text: None, ask=None, correction=
         checks = seal(settings, number)
     red = sum(not check["before"]["ok"] for check in checks)
     progress(f"Job {number}: {len(checks)} check(s) sealed, {red} failing as they should. Now doing the work.")
-    second = run_agent(settings, job, "work", work_prompt(request, [check["name"] for check in checks], settled))
+    second = run_agent(settings, job, "work", work_prompt(request, [check["name"] for check in checks],
+                                                          [entry["said"] for entry in load_decisions(settings)]))
     state = load_state(job)
     state["agent_exit"] = {"checks": first["code"], "work": second["code"]}
     save_state(job, state)

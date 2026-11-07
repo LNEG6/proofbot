@@ -185,6 +185,7 @@ with tempfile.TemporaryDirectory() as directory:
     state, report = shop("shop_ignore", "shop_ignore", lambda text: "B")  # updates the check, then builds the old thing
     assert state["verdict"] == "NOT DONE", report
     assert "FAIL does not do what you decided" in report, report
+    assert proof.load_decisions(settings(root, Path(state["workspace"]))), "an answer stands even when the job fails"
 
     state, report = shop("shop_clear", "shop", lambda text: 1 / 0, readers="agree")  # one meaning: nobody is bothered
     assert state["verdict"] == "DONE AND PROVEN" and "check_price.py: 1 meaning(s)" in report, report
@@ -243,7 +244,7 @@ with tempfile.TemporaryDirectory() as directory:
         return shared, folder, number
 
     shared, folder, number = team("team_change", "B")  # the person who decided agrees to change it
-    assert not proof.load_decisions(shared), "the old decision must be gone"
+    assert [entry["job"] for entry in proof.load_decisions(shared)] == [int(number)], "the old decision must be gone"
     assert not proof.load_library(shared), "its old proof must stop binding the workspace"
     proof.seal(shared, number)
     (folder / "shop.py").write_text("def price(subtotal, member, coupon):\n    pct = 10 if member and subtotal > 50 else 0\n"
@@ -276,6 +277,13 @@ with tempfile.TemporaryDirectory() as directory:
     assert "Fix the whole kind of" in proof.checks_prompt("Stop doing that.", correction=True)
     assert "These bind you" not in proof.checks_prompt("Add subtract to calc.py.")
     assert 'keep the description but lose the thing are "wrong"' in proof.review_prompt("A chart, spread out.", [])
+
+    full = {"ok": True, "questions": [], "conflicts": ["x"], "dropped": [
+        {"id": "q1", "worth": False, "why": "you have already answered enough questions on this job"}, {"id": "q2", "worth": False, "why": "silly"}]}
+    readings.promote(full, 3)
+    assert not full["questions"], "the limit is three for the whole job"
+    full = {"ok": True, "questions": [], "conflicts": ["x"], "dropped": [{"id": "q2", "worth": False, "why": "silly"}]}
+    assert [item["id"] for item in readings.promote(full, 1)["questions"]] == ["q2"]
 
     many = {"ok": True, "questions": [{"id": f"q{n}", "worth": True} for n in range(4)], "dropped": []}
     kept = readings.keep_to_budget(many, 2)

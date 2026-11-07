@@ -63,7 +63,8 @@ agents:
          Each must fail now and pass only when the task is really done. Test real behaviour.
          Touch nothing outside proof_checks/.
          Where the inputs can be listed, define DOMAIN (a dict of input name to a list or range:
-         every role, status or option; for numbers, negatives, zero and edge values), run(**inputs)
+         every role, status or option; for numbers, realistic values and the boundaries that
+         matter, never impossible ones like a negative age), run(**inputs)
          returning the code's output, and expected(**inputs) returning the one right output, never
          a set of acceptable answers. expected must work it out by itself and must not call the code
          being checked. Also assert the person's own example. Text counts: list realistic examples
