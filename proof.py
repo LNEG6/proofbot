@@ -1,0 +1,951 @@
+"""Proof of done: an agent works in a workspace, then this harness proves whether it really did.
+
+How a job runs:
+1. The harness snapshots the workspace and runs your test suite.
+2. The agent writes acceptance checks for the task in proof_checks/, without doing the task.
+3. The harness seals a copy of those checks outside the workspace and runs them. They must
+   fail now; a check that already passes proves nothing.
+4. The agent does the task.
+5. The harness runs its sealed copy of the checks and your test suite again, diffs the
+   workspace, scans the diff for the usual ways of faking it, and writes a report with a
+   receipt ID. The agent never runs these checks or writes this report.
+
+Everything the harness keeps (sealed checks, evidence, the receipt ledger) lives in its home
+folder, outside the workspace the agent can write to.
+"""
+import argparse
+import datetime as dt
+import difflib
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+CHECK_DIR = "proof_checks"
+MESSAGE_LIMIT = 4000  # WhatsApp allows 4096 characters per message
+SANDBOX_FLAGS = ["-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+                 "-c", "sandbox_workspace_write.exclude_slash_tmp=true"]
+TEST_PATH = re.compile(r"(^|/)(tests?/|__tests__/|test_[^/]*\.py$|[^/]*_test\.py$|[^/]*\.(test|spec)\.[jt]sx?$|conftest\.py$)")
+CONFIG_PATH = re.compile(r"(^|/)(pytest\.ini|setup\.cfg|tox\.ini|pyproject\.toml|package\.json|jest\.config\.[^/]+|"
+                         r"vitest\.config\.[^/]+|\.github/workflows/[^/]+|\.gitignore|\.gitattributes|Makefile)$")
+SKIP_MARK = re.compile(r"@pytest\.mark\.(skip|xfail)|pytest\.(skip|xfail)\(|unittest\.skip|@skip\w*\b|"
+                       r"\b(it|test|describe)\.(skip|only)\(|\bx(it|describe|test)\(|--no-verify|raise SkipTest")
+ASSERTION = re.compile(r"\bassert\w*\b|\bexpect\(|\.should\b")
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def digest(data):
+    return hashlib.sha256(data if isinstance(data, bytes) else canonical(data).encode("utf-8")).hexdigest()
+
+
+def letters(text):
+    return "".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def split_command(text):
+    return [part.strip('"') for part in shlex.split(text, posix=False)]
+
+
+def tail(text, size=300):
+    text = " ".join(text.split())
+    return text if len(text) <= size else "..." + text[-size:]
+
+
+class Settings:
+    """Where the agent works, where the harness keeps its evidence, and how things run."""
+
+    def __init__(self, workspace, home, codex=None, runner="sandbox", test_command=None, timeout=1800, python=None,
+                 review="on"):
+        self.workspace = Path(workspace).resolve()
+        self.home = Path(home).resolve()
+        if self.home == self.workspace or self.workspace in self.home.parents or self.home in self.workspace.parents:
+            raise ValueError("Keep the harness home and the workspace in separate folders, or the agent could edit the evidence.")
+        installed = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "OpenAI" / "Codex" / "bin" / "codex.exe"
+        found = shutil.which("codex") or (str(installed) if installed.is_file() else "codex")
+        self.codex = split_command(codex) if codex else [found]
+        if runner not in ("sandbox", "direct"):
+            raise ValueError("CHECK_RUNNER must be sandbox or direct.")
+        self.runner, self.test_command, self.timeout = runner, test_command or None, int(timeout)
+        self.python = python or sys.executable
+        if review not in ("on", "off"):
+            raise ValueError("REVIEW must be on or off.")
+        self.review = review
+
+    @classmethod
+    def from_env(cls, env):
+        return cls(env["WORKSPACE"], env.get("PROOF_HOME") or Path(__file__).with_name("home"),
+                   env.get("CODEX_COMMAND"), env.get("CHECK_RUNNER", "sandbox"), env.get("TEST_COMMAND"),
+                   env.get("AGENT_TIMEOUT", 1800), env.get("CHECK_PYTHON"), env.get("REVIEW", "on"))
+
+
+def load_env(path):
+    """Read KEY=value lines from a .env file; real environment variables win."""
+    values = {}
+    if Path(path).exists():
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.strip().strip('"').strip("'")
+    known = ("WORKSPACE", "PROOF_HOME", "CODEX_COMMAND", "CHECK_RUNNER", "TEST_COMMAND", "AGENT_TIMEOUT", "CHECK_PYTHON", "REVIEW",
+             "WHATSAPP_TOKEN", "PHONE_NUMBER_ID", "APP_SECRET", "VERIFY_TOKEN", "OWNER_NUMBER", "GRAPH_BASE", "PORT")
+    values.update({key: os.environ[key] for key in known if key in os.environ})
+    return values
+
+
+# ---------------------------------------------------------------- workspace snapshots
+
+def git(settings, *args, env=None, data=False):
+    command = ["git", "-c", "core.quotepath=off", "-C", str(settings.workspace), *args]
+    result = subprocess.run(command, capture_output=True, env=env)
+    if result.returncode:
+        raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.decode('utf-8', 'replace').strip()}")
+    return result.stdout if data else result.stdout.decode("utf-8", "replace")
+
+
+def snapshot(settings):
+    """Record the whole workspace (except ignored files) as a git tree, without touching your branch or index."""
+    if not (settings.workspace / ".git").exists():
+        git(settings, "init", "-q")
+    index = settings.home / "snapshot.index"
+    index.unlink(missing_ok=True)
+    env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+    git(settings, "add", "-A", env=env)
+    return git(settings, "write-tree", env=env).strip()
+
+
+def tree_files(settings, tree, folder=None):
+    names = git(settings, "ls-tree", "-r", "--name-only", tree, *([folder] if folder else [])).splitlines()
+    return [name for name in names if name]
+
+
+def read_blob(settings, tree, path):
+    return git(settings, "cat-file", "blob", f"{tree}:{path}", data=True)
+
+
+def diff_files(settings, old, new):
+    """Changed project files with line counts, leaving out the agent's check folder and Python's bytecode caches."""
+    scope = ["--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", "--", ".", f":(exclude){CHECK_DIR}",
+             ":(exclude,glob)**/__pycache__/**", ":(exclude,glob)**/*.pyc"]
+    counts = {}
+    for line in git(settings, "diff", "--numstat", "--no-renames", old, new, *scope).splitlines():
+        added, removed, path = line.split("\t", 2)
+        counts[path] = (int(added) if added.isdigit() else 0, int(removed) if removed.isdigit() else 0)
+    files = []
+    for line in git(settings, "diff", "--name-status", "--no-renames", old, new, *scope).splitlines():
+        status, path = line.split("\t", 1)
+        added, removed = counts.get(path, (0, 0))
+        files.append({"path": path, "status": status[0], "added": added, "removed": removed})
+    lines = {}
+    current = previous = None
+    for line in git(settings, "diff", "-U0", "--no-renames", old, new, *scope).splitlines():
+        if line.startswith("--- "):
+            previous = line[6:] if line.startswith("--- a/") else None
+        elif line.startswith("+++ "):
+            current = line[6:] if line.startswith("+++ b/") else previous
+        elif current and line[:1] in "+-":
+            lines.setdefault(current, {"+": [], "-": []})[line[0]].append(line[1:])
+    return files, lines
+
+
+# ---------------------------------------------------------------- running things
+
+def runner_prefix(settings):
+    return [*settings.codex, "sandbox", *SANDBOX_FLAGS, "--"] if settings.runner == "sandbox" else []
+
+
+EXHAUSTIVE_LIMIT = 10_000_000
+TABLE_ROWS = 24  # a decision table this small is printed in full in the report, so you can read every row
+MARK = "PROOFBOT-EXHAUSTIVE "
+
+# Runs the sealed bytes from standard input as if they were the file in proof_checks/, so __file__ works.
+# Proof by exhaustion, like Lean's `decide`: a check that defines DOMAIN (input name -> finite range or list) and
+# either run() + expected() or holds() is tried by this code, not the agent's, on every combination of inputs.
+# run() + expected() also maps every input to its output and fingerprints the whole map.
+BOOT = r'''
+import hashlib, itertools, json, sys
+path = sys.argv[1]
+sys.argv = [path]
+source = sys.stdin.buffer.read()
+space = {"__name__": "__main__", "__file__": path, "__builtins__": __builtins__}
+exec(compile(source, path, "exec"), space)
+domain, run, expected, holds = (space.get(key) for key in ("DOMAIN", "run", "expected", "holds"))
+mapped = callable(run) and callable(expected)
+if isinstance(domain, dict) and domain and (mapped or callable(holds)):
+    names = list(domain)
+    columns = [list(domain[name]) for name in names]
+    total = 1
+    for column in columns:
+        total *= len(column)
+    def describe(name, column):
+        given = domain[name]
+        if isinstance(given, range) and given.step == 1 and len(given):
+            return f"{name} {given.start}..{given.stop - 1}"
+        shown = [repr(value) for value in column]
+        if len(shown) <= 6 and sum(map(len, shown)) <= 60:
+            return f"{name} in {'/'.join(shown)}"
+        return f"{name} {len(column)} values"
+    summary = {"total": total, "domain": ", ".join(describe(n, c) for n, c in zip(names, columns))}
+    def report(**extra):
+        print("MARK" + json.dumps({**summary, **extra}), flush=True)
+    if total == 0 or total > LIMIT:
+        report(error="no inputs" if total == 0 else "too many combinations")
+        sys.exit(f"{total:,} combinations: a proof by exhaustion needs between 1 and {LIMIT:,}")
+    table, rows = hashlib.sha256(), []
+    for combo in itertools.product(*columns):
+        inputs = dict(zip(names, combo))
+        shown = ", ".join(f"{key}={value!r}" for key, value in inputs.items())
+        try:
+            if mapped:
+                got, want = run(**inputs), expected(**inputs)
+                table.update(repr((combo, got)).encode())
+                ok, why = got == want, f"got {got!r}, expected {want!r}"
+                if total <= TABLE:
+                    rows.append(f"{shown} -> {got!r}"[:120])
+            else:
+                result = holds(**inputs)
+                ok, why = result is None or bool(result), "the rule does not hold"
+        except Exception as error:
+            ok, why = False, f"{type(error).__name__}: {error}"
+        if not ok:
+            report(counterexample=f"{shown}: {why}"[:200])
+            sys.exit(f"counterexample: {shown}: {why}"[:300])
+    report(map=table.hexdigest()[:12] if mapped else None, **({"rows": rows} if rows else {}))
+'''.replace("MARK", MARK).replace("LIMIT", str(EXHAUSTIVE_LIMIT)).replace("TABLE", str(TABLE_ROWS))
+
+
+def run_check(settings, source, name="check.py"):
+    """Run one sealed check from the harness's own copy, fed on standard input, inside the workspace."""
+    command = [*runner_prefix(settings), settings.python, "-c", BOOT, str(settings.workspace / CHECK_DIR / name)]
+    try:
+        result = subprocess.run(command, cwd=settings.workspace, input=source, capture_output=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "code": "timeout", "tail": "ran longer than 180 seconds"}
+    output = (result.stdout + result.stderr).decode("utf-8", "replace")
+    marks = [line[len(MARK):] for line in output.splitlines() if line.startswith(MARK)]
+    output = "\n".join(line for line in output.splitlines() if not line.startswith(MARK))
+    outcome = {"ok": result.returncode == 0, "code": result.returncode, "tail": tail(output)}
+    if marks:
+        try:
+            outcome["exhaustive"] = json.loads(marks[-1])
+        except ValueError:
+            pass
+    return outcome
+
+
+def exhaustive_note(result):
+    """How much of the input space a passing check covered, for the report."""
+    info = (result or {}).get("exhaustive")
+    if not info or not result.get("ok"):
+        return ""
+    mapped = f", every output as expected (map {info['map']})" if info.get("map") else ""
+    return f"; all {info['total']:,} inputs tried: {info['domain']}{mapped}"
+
+
+def run_suite(settings):
+    if not settings.test_command:
+        return None
+    command = [*runner_prefix(settings), *split_command(settings.test_command)]
+    try:
+        result = subprocess.run(command, cwd=settings.workspace, capture_output=True, timeout=900)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "code": "timeout", "tail": "ran longer than 15 minutes"}
+    output = (result.stdout + result.stderr).decode("utf-8", "replace")
+    return {"ok": result.returncode == 0, "code": result.returncode, "tail": tail(output)}
+
+
+def sandbox_works(settings):
+    """Can the sandbox start Python here? On Windows its account often cannot read a per-user Python install."""
+    if settings.runner != "sandbox":
+        return True, "checks run without a sandbox (CHECK_RUNNER=direct)"
+    probe = run_check(settings, b"print('sandbox-ok')")
+    return probe["ok"], probe["tail"]
+
+
+def run_agent(settings, job, phase, prompt):
+    """Run Codex once, fully automatic, sandboxed to the workspace. The prompt goes in on standard input."""
+    last = job / f"{phase}-reply.txt"
+    command = [*settings.codex, "exec", "-s", "workspace-write", *SANDBOX_FLAGS, "-C", str(settings.workspace),
+               "--skip-git-repo-check", "--color", "never", "-o", str(last), "-"]
+    try:
+        result = subprocess.run(command, input=prompt.encode("utf-8"), capture_output=True, timeout=settings.timeout)
+        code = result.returncode
+        log = (result.stdout + result.stderr).decode("utf-8", "replace")
+    except subprocess.TimeoutExpired as error:
+        code, log = "timeout", ((error.stdout or b"") + (error.stderr or b"")).decode("utf-8", "replace")
+    (job / f"{phase}-log.txt").write_text(log, encoding="utf-8")
+    reply = last.read_text(encoding="utf-8", errors="replace").strip() if last.exists() else ""
+    return {"code": code, "reply": reply}
+
+
+def checks_prompt(request):
+    return f"""You are preparing proof for a task. Do NOT do the task itself yet.
+
+The owner's task, word for word:
+<<<
+{request}
+>>>
+
+Write acceptance checks in the folder {CHECK_DIR}/ of this workspace:
+- One Python file per requirement, named check_<short_name>.py, using only the standard library.
+- Start each file with a docstring that states the requirement in plain words, quoting the owner where you can.
+- The working directory is this workspace and there is no network. Import project code normally.
+- Exit normally only when the requirement is met; otherwise fail with an AssertionError that says what is wrong.
+- Test real behaviour: run the program, call the function, read the output. Only check that a file
+  contains something when the task is about that file's text.
+- Prove each rule by exhaustion where the inputs can be listed: define DOMAIN, a dict of input name -> range or
+  list (every option, like each role, status, customer type or flag; for numbers cover negatives, zero and edge
+  values; at most 10 million combinations in all), plus run(**inputs), which
+  calls the code and returns its output, and expected(**inputs), which returns the right output. The harness tries
+  every combination and maps every input to its output. Assert the owner's own example at the top too.
+  Where inputs can't be listed (free text, files), test many varied inputs in a loop instead.
+- Every check must FAIL right now, because the task is not done yet.
+- Do not create, change or delete anything outside {CHECK_DIR}/.
+
+Reply with one line per check: its file name and what it proves."""
+
+
+def work_prompt(request, sealed):
+    return f"""Do this task in this workspace, completely, without asking questions:
+<<<
+{request}
+>>>
+
+Acceptance checks were written beforehand: {', '.join(sealed) or 'none'}. They are sealed. The harness runs
+its own copy, so editing anything in {CHECK_DIR}/ cannot help and gets the job flagged.
+Do not delete, skip or weaken tests, and do not change test or build settings to make things pass.
+When you are finished, reply in at most five lines: what you changed and why, naming each file."""
+
+
+# ---------------------------------------------------------------- reviewing the checks against the request
+
+def review_prompt(request, sealed):
+    checks = "\n\n".join(f"=== {name} ===\n{source.decode('utf-8', 'replace').lstrip(chr(0xFEFF)).strip()}"
+                         for name, source in sealed)
+    return f"""You review acceptance checks for a coding task. You did not write them, and you will not see the work or the
+agent's reasoning. Your only job: decide whether these checks test what the owner asked for. The agent that wrote
+them may have misunderstood the request, left part of it out, or tested something different.
+
+The owner's request, word for word:
+<<<
+{request}
+>>>
+
+The checks. The task only counts as done if every one of them passes.
+{checks}
+
+Split the request into the separate things the owner asked for, each in the owner's own words, short. For each,
+name the checks that test it and say whether they test it the way the owner meant:
+- "covered": a check would fail if this part were not done as asked.
+- "narrow": the owner asked for a general rule (like "returns the product" or "fix add"), but the checks try so few
+  inputs (typically one or two) that special-casing those inputs would pass. Several varied inputs, or a loop over
+  many generated inputs, is not narrow. If the owner only asked about one specific case, checking it is "covered".
+  A check that defines DOMAIN with run() and expected(), or holds(), is run by the harness on EVERY combination in
+  DOMAIN: judge whether that domain covers what the owner asked (too small, or missing cases they named, is narrow).
+- "wrong": a check tests this part but expects something different from what the owner meant.
+- "missing": no check tests this part.
+Then list any check that tests something the owner did not ask for.
+Ignore greetings and @mentions. Do not run any commands; everything you need is above.
+
+Reply with JSON only, no other text:
+{{"parts": [{{"asked": "...", "checks": ["check_x.py"], "status": "covered", "why": ""}}],
+ "extra": [{{"check": "check_y.py", "why": "..."}}]}}
+Give "why" in one short plain sentence whenever status is not "covered"."""
+
+
+def parse_review(reply, names):
+    """Read the reviewer's JSON strictly. Anything unreadable counts as no review, never as a pass."""
+    def name_of(value):
+        name = Path(str(value)).name
+        return name if name.endswith(".py") else name + ".py"
+
+    def short(value, size):
+        return " ".join(str(value or "").split())[:size]
+
+    try:
+        data = json.loads(reply[reply.find("{"):reply.rfind("}") + 1])
+        parts = []
+        for part in data["parts"]:
+            checks = [name for name in map(name_of, part.get("checks") or []) if name in names]
+            status = part.get("status") if part.get("status") in ("covered", "narrow", "wrong", "missing") else "wrong"
+            why = short(part.get("why"), 200)
+            if status in ("covered", "narrow") and not checks:
+                status, why = "missing", why or "no sealed check was named for it"
+            parts.append({"asked": short(part["asked"], 160), "checks": checks, "status": status, "why": why})
+        extra = [{"check": name_of(item["check"]), "why": short(item.get("why"), 200)}
+                 for item in data.get("extra") or [] if name_of(item.get("check")) in names]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return {"ok": False, "error": "the reviewer's answer could not be read"}
+    if not parts:
+        return {"ok": False, "error": "the reviewer found nothing in the request to check"}
+    return {"ok": True, "parts": parts, "extra": extra}
+
+
+def review_checks(settings, job, request, sealed):
+    """A second AI, shown only the request and the sealed checks, says whether they test what was asked."""
+    if not sealed:
+        return None
+    if settings.review == "off":
+        return {"ok": False, "error": "the review is turned off (REVIEW=off)"}
+    folder = job / "review"
+    folder.mkdir(exist_ok=True)
+    last = folder / "reply.txt"
+    last.unlink(missing_ok=True)
+    command = [*settings.codex, "exec", "-s", "read-only", "-C", str(folder), "--skip-git-repo-check",
+               "--color", "never", "-o", str(last), "-"]
+    try:
+        result = subprocess.run(command, input=review_prompt(request, sealed).encode("utf-8"), capture_output=True,
+                                timeout=600)
+        (folder / "log.txt").write_bytes(result.stdout + result.stderr)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {"ok": False, "error": f"the reviewer could not run ({type(error).__name__})"}
+    reply = last.read_text(encoding="utf-8", errors="replace") if last.exists() else ""
+    return parse_review(reply, [name for name, _ in sealed])
+
+
+def review_gaps(review, statuses=("missing", "wrong")):
+    """Parts of the request the checks don't test as meant. Narrow parts are tested, but only on a few examples."""
+    return [part for part in review["parts"] if part["status"] in statuses] if review and review.get("ok") else []
+
+
+def review_lines(review):
+    if not review.get("ok"):
+        return [f"WARN nothing checked the checks against your request: {review['error']}"]
+    lines = []
+    for part in review["parts"]:
+        named = ", ".join(part["checks"])
+        if part["status"] == "covered":
+            lines.append(f'ok "{part["asked"]}": {named}')
+        elif part["status"] == "narrow":
+            lines.append(f'NARROW "{part["asked"]}": {named} tries too few inputs. '
+                         f'{part["why"] or "Special-casing them would pass."}')
+        elif part["status"] == "missing":
+            lines.append(f'MISSING "{part["asked"]}": no check tests this.' + (f" {part['why']}" if part["why"] else ""))
+        else:
+            lines.append(f'WRONG "{part["asked"]}": {named or "the check"} tests something else. {part["why"]}'.rstrip())
+    lines += [f"EXTRA {item['check']} tests something you did not ask for. {item['why']}".rstrip()
+              for item in review.get("extra", [])]
+    return lines
+
+
+def fix_checks_prompt(request, gaps):
+    listed = "\n".join(f'- "{part["asked"]}": {part["status"]}. {part["why"]}' for part in gaps)
+    return f"""Do NOT do the task itself yet. A reviewer compared your acceptance checks in {CHECK_DIR}/ with the
+owner's task and found parts that are not tested the way the owner meant:
+{listed}
+
+The owner's task, word for word:
+<<<
+{request}
+>>>
+
+Fix or add checks in {CHECK_DIR}/ so every part of the task is tested as the owner meant, over many inputs where
+the owner asked for a general rule. Same rules as before:
+one file per requirement, a docstring quoting the owner, standard library only, and every check must FAIL right
+now. Do not create, change or delete anything outside {CHECK_DIR}/. Reply with one line per check."""
+
+
+# ---------------------------------------------------------------- jobs
+
+def job_dir(settings, number):
+    return settings.home / "jobs" / str(number)
+
+
+def new_job(settings, request):
+    (settings.home / "jobs").mkdir(parents=True, exist_ok=True)
+    numbers = [int(path.name) for path in (settings.home / "jobs").iterdir() if path.name.isdigit()]
+    number = max(numbers, default=0) + 1
+    job = job_dir(settings, number)
+    job.mkdir()
+    state = {"job": number, "request": request, "runner": settings.runner, "workspace": str(settings.workspace),
+             "started": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+    save_state(job, state)
+    return number, job
+
+
+def load_state(job):
+    return json.loads((job / "state.json").read_text(encoding="utf-8"))
+
+
+def save_state(job, state):
+    (job / "state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------- the proven library (like Lean's Mathlib)
+
+def library_dir(settings):
+    """Checks proven in earlier jobs on this workspace. Like theorems in Mathlib, once proven they must stay proven."""
+    return settings.home / "library" / digest(str(settings.workspace).lower())[:12]
+
+
+def load_library(settings):
+    path = library_dir(settings) / "library.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+
+
+def run_library(settings, full=False):
+    """Run every check in the library from the harness's own copy. Returns {file: passed}, or full results."""
+    results = {}
+    for entry in load_library(settings):
+        source = (library_dir(settings) / entry["file"]).read_bytes()
+        if digest(source) != entry["sha256"]:
+            raise RuntimeError(f"library check {entry['file']} changed inside the harness home")
+        result = run_check(settings, source, entry["name"])
+        results[entry["file"]] = result if full else result["ok"]
+    return results
+
+
+def library_results(settings, state):
+    before, after = state.get("library_before", {}), run_library(settings, full=True)
+    results = []
+    for entry in load_library(settings):
+        now = after[entry["file"]]
+        row = {"file": entry["file"], "name": entry["name"], "says": entry["says"], "job": entry["job"],
+               "before": before.get(entry["file"]), "after": now["ok"]}
+        if not now["ok"] and (now.get("exhaustive") or {}).get("counterexample"):
+            row["counterexample"] = now["exhaustive"]["counterexample"]
+        results.append(row)
+    return results
+
+
+def add_to_library(settings, state, job):
+    """After a DONE verdict, keep each check that failed before and passes now; every later job must keep it passing."""
+    folder = library_dir(settings)
+    folder.mkdir(parents=True, exist_ok=True)
+    entries, added = load_library(settings), []
+    for check in state.get("checks", []):
+        if check["before"]["ok"] or not check["after"]["ok"]:
+            continue
+        file = f"job{state['job']}_{check['name']}"
+        (folder / file).write_bytes((job / "sealed" / check["name"]).read_bytes())
+        entries.append({"file": file, "name": check["name"], "says": check["says"], "job": state["job"],
+                        "sha256": check["sha256"]})
+        added.append(check["name"])
+    (folder / "library.json").write_text(json.dumps(entries, indent=2), encoding="utf-8")
+    return added
+
+
+def library_lines(state):
+    library, lines = state["library"], []
+    if not library:
+        lines.append("- none yet")
+    for entry in library:
+        if entry["after"]:
+            note = "was broken before this job, holds again" if entry["before"] is False else "still holds"
+            level = "ok"
+        else:
+            note = "already broken before this job" if entry["before"] is False else "broken by this job"
+            level = "WARN" if entry["before"] is False else "FAIL"
+        found = f"; counterexample {entry['counterexample']}" if entry.get("counterexample") else ""
+        lines.append(f"{level} {entry['name']} from job {entry['job']}: {entry['says'][:90]} ({note}{found})")
+    if len(lines) > 8:  # keep problems in full, fold the rest
+        good = sum(line.startswith("ok ") for line in lines)
+        lines = [line for line in lines if not line.startswith("ok ")] + [f"ok {good} more still hold"]
+    if state.get("library_added"):
+        lines.append(f"Added to the library, so every later job must keep them passing: {', '.join(state['library_added'])}")
+    return lines
+
+
+def relies_on(state):
+    """What the proof assumes, the way Lean's #print axioms lists what a theorem depends on."""
+    review, out = state.get("review"), []
+    if review and review.get("ok"):
+        out.append("a second AI, not you, judged that the checks match your request")
+    elif state.get("checks"):
+        out.append("nothing checked that the checks match your request")
+    if review_gaps(review, ("narrow",)):
+        out.append("some parts are proven only for a few example inputs")
+    checks = [check for check in state.get("checks", []) if check.get("after", {}).get("ok")]
+    for check in checks:
+        info = check["after"].get("exhaustive")
+        if info:
+            out.append(f"{check['name']} is proven for every input in its domain ({info['domain']}), not beyond it")
+    sampled = [check["name"] for check in checks if not check["after"].get("exhaustive")]
+    if sampled:
+        out.append(f"{', '.join(sampled)} tried chosen inputs, not every input in a domain")
+    if state["runner"] != "sandbox":
+        out.append("the checks and tests ran without a sandbox, with your full access")
+    if state.get("suite_before") is None:
+        out.append("no test suite is configured, so only the sealed checks ran")
+    return out or ["nothing beyond the harness itself"]
+
+
+def begin(settings, request):
+    """Step 1: snapshot the workspace and run the test suite and the proven library before anything changes."""
+    number, job = new_job(settings, request)
+    state = load_state(job)
+    state["before"] = snapshot(settings)
+    state["suite_before"] = run_suite(settings)
+    state["library_before"] = run_library(settings)
+    save_state(job, state)
+    return number
+
+
+def seal(settings, number):
+    """Step 3: copy the agent's checks out of its reach and run them before the work starts."""
+    job = job_dir(settings, number)
+    state = load_state(job)
+    tree = snapshot(settings)
+    (job / "sealed").mkdir(exist_ok=True)
+    checks = []
+    for path in tree_files(settings, tree, CHECK_DIR):
+        if not path.endswith(".py"):
+            continue
+        source = read_blob(settings, tree, path)
+        name = Path(path).name
+        (job / "sealed" / name).write_bytes(source)
+        doc = re.search(rb'^(?:\xef\xbb\xbf)?\s*[ru]?("""|\'\'\')(.*?)\1', source, re.S)
+        text = " ".join(doc.group(2).decode("utf-8", "replace").split()) if doc else "(no description)"
+        checks.append({"name": name, "path": path, "sha256": digest(source), "says": text[:160],
+                       "before": run_check(settings, source, name)})
+    strays, _ = diff_files(settings, state["before"], tree)
+    sealed = [(check["name"], (job / "sealed" / check["name"]).read_bytes()) for check in checks]
+    state.update(sealed_tree=tree, checks=checks, strays=[item["path"] for item in strays],
+                 review=review_checks(settings, job, state["request"], sealed))
+    save_state(job, state)
+    return checks
+
+
+def finish(settings, number, claim=""):
+    """Step 5: re-run everything from the harness's side, scan for cheating, and write the receipt."""
+    job = job_dir(settings, number)
+    state = load_state(job)
+    after = snapshot(settings)
+    for check in state.get("checks", []):
+        source = (job / "sealed" / check["name"]).read_bytes()
+        if digest(source) != check["sha256"]:
+            raise RuntimeError(f"sealed copy of {check['name']} changed inside the harness home")
+        check["after"] = run_check(settings, source, check["name"])
+        try:
+            current = read_blob(settings, after, check["path"])
+            check["edited"] = digest(current) != check["sha256"]
+        except RuntimeError:
+            check["edited"] = "deleted"
+    files, lines = diff_files(settings, state["sealed_tree"], after)
+    state.update(after=after, claim=claim.strip(), files=files, suite_after=run_suite(settings),
+                 finished=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+    if "library_before" in state:  # jobs begun before the library existed don't get one
+        state["library"] = library_results(settings, state)
+    state["scan"] = scan(state, lines, tree_files(settings, after))
+    state["verdict"] = verdict(state)
+    if "library_before" in state:
+        state["library_added"] = add_to_library(settings, state, job) if state["verdict"].startswith("DONE") else []
+        state["assumptions"] = relies_on(state)
+    ledger = settings.home / "ledger.jsonl"
+    entries = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()] if ledger.exists() else []
+    state["previous"] = entries[-1]["receipt"] if entries else None
+    evidence = {key: state.get(key) for key in EVIDENCE}
+    receipt = f"P{number}-{digest(evidence)[:12]}"
+    state["receipt"] = receipt
+    save_state(job, state)
+    (job / "evidence.json").write_text(canonical(evidence), encoding="utf-8")
+    with ledger.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"job": number, "receipt": receipt, "previous": state["previous"]}) + "\n")
+    report = render(state)
+    (job / "report.txt").write_text(report, encoding="utf-8")
+    return state, report
+
+
+EVIDENCE = ("job", "request", "claim", "runner", "before", "sealed_tree", "after", "checks", "strays", "files",
+            "suite_before", "suite_after", "scan", "verdict", "previous", "review", "library", "library_added",
+            "assumptions")
+
+
+def run_job(settings, request, progress=lambda text: None):
+    """The whole job, start to finish, with Codex doing steps 2 and 4."""
+    number = begin(settings, request)
+    job = job_dir(settings, number)
+    progress(f"Job {number}: writing the checks that will prove it.")
+    first = run_agent(settings, job, "checks", checks_prompt(request))
+    checks = seal(settings, number)
+    gaps = review_gaps(load_state(job).get("review"), ("missing", "wrong", "narrow"))
+    if gaps:  # one chance to fix a misunderstanding or a too-narrow check before any work is done
+        progress(f"Job {number}: the reviewer says {len(gaps)} part(s) of the task are not tested as you meant. "
+                 "Fixing the checks first.")
+        run_agent(settings, job, "checks-fix", fix_checks_prompt(request, gaps))
+        checks = seal(settings, number)
+    red = sum(not check["before"]["ok"] for check in checks)
+    progress(f"Job {number}: {len(checks)} check(s) sealed, {red} failing as they should. Now doing the work.")
+    second = run_agent(settings, job, "work", work_prompt(request, [check["name"] for check in checks]))
+    state = load_state(job)
+    state["agent_exit"] = {"checks": first["code"], "work": second["code"]}
+    save_state(job, state)
+    return finish(settings, number, second["reply"] or "(the agent gave no summary)")
+
+
+# ---------------------------------------------------------------- judging
+
+def scan(state, lines, after_files):
+    """Each way of faking it, with ok or a problem, so the report shows every check, not just failures."""
+    items = []
+
+    def item(level, text):
+        items.append({"level": level, "text": text})
+
+    checks = state.get("checks", [])
+    real = [check for check in checks if not check["before"]["ok"]]
+    empty = [check["name"] for check in checks if check["before"]["ok"]]
+    edited = [check["name"] for check in checks if check.get("edited")]
+    item("FAIL" if edited else "ok", f"sealed checks edited or deleted by the agent: {', '.join(edited)} "
+                                     "(the harness ran its own copy)" if edited
+         else "sealed checks untouched; the harness ran its own copy")
+    if not checks:
+        item("FAIL", "no acceptance checks were written, so nothing proves the work")
+    else:
+        item("WARN" if empty else "ok", f"already passed before any work, so they prove nothing: {', '.join(empty)}"
+             if empty else f"all {len(checks)} check(s) failed before the work, so they test something new")
+    files = state["files"]
+    paths = {item_["path"] for item_ in files}
+    item("ok" if files else "FAIL", f"{len(files)} project file(s) changed" if files else "no project files changed")
+    deleted = [f["path"] for f in files if f["status"] == "D" and TEST_PATH.search(f["path"])]
+    item("FAIL" if deleted else "ok", f"test files deleted: {', '.join(deleted)}" if deleted else "no test files deleted")
+    skips = [f"{path}: {line.strip()[:60]}" for path, change in lines.items() for line in change["+"] if SKIP_MARK.search(line)]
+    item("FAIL" if skips else "ok", f"skip or only markers added: {'; '.join(skips[:3])}" if skips
+         else "no tests skipped, marked xfail or narrowed with only")
+    lost = {}
+    for path, change in lines.items():
+        if TEST_PATH.search(path):
+            net = sum(bool(ASSERTION.search(l)) for l in change["-"]) - sum(bool(ASSERTION.search(l)) for l in change["+"])
+            if net > 0:
+                lost[path] = net
+    item("FAIL" if lost else "ok", "assertions removed from tests: " + ", ".join(f"{p} (-{n})" for p, n in lost.items())
+         if lost else "no assertions removed from tests")
+    touched = [path for path in paths if TEST_PATH.search(path) and path not in deleted]
+    item("WARN" if touched else "ok", f"existing tests edited, read them: {', '.join(touched)}" if touched
+         else "no existing tests edited")
+    config = [path for path in paths if CONFIG_PATH.search(path)]
+    item("WARN" if config else "ok", f"test or build settings changed: {', '.join(config)}" if config
+         else "no test or build settings changed")
+    before, after = state.get("suite_before"), state.get("suite_after")
+    if before is None:
+        item("WARN", "no test suite configured (set TEST_COMMAND), so only the sealed checks were run")
+    elif after["ok"]:
+        item("ok", f"test suite passes (before: {'pass' if before['ok'] else 'fail'}, after: pass)")
+    else:
+        item("FAIL" if before["ok"] else "WARN", "test suite passed before and fails now" if before["ok"]
+             else "test suite was already failing before the work and still fails")
+    strays = state.get("strays", [])
+    item("WARN" if strays else "ok", f"while writing checks the agent also changed: {', '.join(strays)}" if strays
+         else "while writing checks the agent touched only the check folder")
+    named = set(re.findall(r"[\w./\\-]+\.[A-Za-z0-9]{1,5}\b", state.get("claim", "")))
+    existing = set(after_files)
+    unchanged = sorted(name.replace("\\", "/") for name in named
+                       if name.replace("\\", "/") in existing and name.replace("\\", "/") not in paths
+                       and not name.startswith(CHECK_DIR))
+    item("WARN" if unchanged else "ok", f"the agent says it changed {', '.join(unchanged)}, but they are unchanged"
+         if unchanged else "every file the agent names was really changed")
+    for check in real:
+        if not check["after"]["ok"]:
+            item("FAIL", f"{check['name']} still fails: {check['after']['tail'][-120:]}")
+    library = state.get("library")
+    if library:
+        broken = [f"{e['name']} from job {e['job']}" for e in library if not e["after"] and e["before"] is not False]
+        item("FAIL" if broken else "ok", f"broke requirements proven in earlier jobs: {', '.join(broken)}" if broken
+             else f"none of the {len(library)} requirement(s) proven in earlier jobs was broken")
+    crashed = {phase: code for phase, code in state.get("agent_exit", {}).items() if code != 0}
+    if crashed:
+        item("WARN", "the agent run ended with an error: " + ", ".join(f"{p} step exit {c}" for p, c in crashed.items()))
+    return items
+
+
+def verdict(state):
+    real = [check for check in state.get("checks", []) if not check["before"]["ok"]]
+    hard = [item for item in state["scan"] if item["level"] == "FAIL" and "no acceptance checks" not in item["text"]]
+    if hard:
+        return "NOT DONE"
+    review = state.get("review")
+    if not real or review_gaps(review):  # part of the request has no check that tests it as meant
+        return "UNPROVEN"
+    unsure = review is not None and (not review.get("ok") or review.get("extra") or review_gaps(review, ("narrow",)))
+    return ("DONE, READ THE WARNINGS" if unsure or any(item["level"] == "WARN" for item in state["scan"])
+            else "DONE AND PROVEN")
+
+
+def render(state, limit=MESSAGE_LIMIT):
+    """One chat message: the result first, then the evidence, all written by the harness."""
+    head = [f"{state['verdict']} - job {state['job']}", f"Receipt {state['receipt']}",
+            f'You asked: "{" ".join(state["request"].split())[:300]}"',
+            f'Agent\'s own summary (a claim, not proof): "{" ".join(state["claim"].split())[:400]}"']
+    files = state["files"]
+    changed = ["", "WHAT CHANGED (measured by the harness)"]
+    changed += [f"- {f['path']}: {'deleted' if f['status'] == 'D' else 'new, ' if f['status'] == 'A' else ''}"
+                f"+{f['added']} -{f['removed']}" for f in files[:12]] or ["- nothing"]
+    if len(files) > 12:
+        changed.append(f"- and {len(files) - 12} more")
+    review = state.get("review")  # jobs from before the review existed keep their old layout and numbering
+    n = 1 if review is None else 2
+    asked = [] if review is None else ["", "PROOF 1: DO THE CHECKS MATCH WHAT YOU ASKED?",
+                                       "(judged by a second AI that saw only your request and the checks)",
+                                       *review_lines(review)]
+    proof1 = ["", f"PROOF {n}: CHECKS WRITTEN AND SEALED BEFORE THE WORK"]
+    for check in state.get("checks", []):
+        before, after = check["before"]["ok"], check["after"]["ok"]
+        result = "PASS" if after and not before else "EMPTY" if before else "FAIL"
+        history = "passed even before the work" if before else "failed before, passes now" if after else "still fails"
+        proof1.append(f"{result} {check['name']}: {check['says'][:110]} ({history}{exhaustive_note(check['after'])})")
+        if check["after"].get("ok"):  # a small decision table is shown whole: every input and the output it got
+            proof1 += [f"   {row}" for row in (check["after"].get("exhaustive") or {}).get("rows", [])]
+    if not state.get("checks"):
+        proof1.append("- none were written")
+    suite = state.get("suite_before"), state.get("suite_after")
+    proof2 = ["", f"PROOF {n + 1}: YOUR TEST SUITE, RUN BY THE HARNESS"]
+    proof2.append("- not configured" if suite[0] is None else
+                  f"before: {'pass' if suite[0]['ok'] else 'FAIL'} (exit {suite[0]['code']}), "
+                  f"after: {'pass' if suite[1]['ok'] else 'FAIL'} (exit {suite[1]['code']})")
+    # Jobs from before the library and the relies-on list existed keep their old layout, so their receipts still verify.
+    library = [] if "library" not in state else ["", f"PROOF {n + 2}: REQUIREMENTS PROVEN IN EARLIER JOBS",
+                                                 *library_lines(state)]
+    m = n + 2 if "library" not in state else n + 3
+    proof3 = ["", f"PROOF {m}: LOOPHOLE SCAN"] + [f"{item['level']} {item['text']}" for item in state["scan"]]
+    if "assumptions" in state:
+        foot = ["", "THIS PROOF RELIES ON", *[f"- {line}" for line in state["assumptions"]], "",
+                f"Check this message: python proof.py verify {state['job']} {state['receipt']}"]
+    else:
+        foot = ["", f"Checks ran {'in the Codex sandbox' if state['runner'] == 'sandbox' else 'without a sandbox'}. "
+                    f"Check this message: python proof.py verify {state['job']} {state['receipt']}"]
+    text = "\n".join(head + changed + asked + proof1 + proof2 + library + proof3 + foot)
+    if len(text) > limit:  # keep problems in full, fold the passing scan lines
+        good = sum(item["level"] == "ok" for item in state["scan"])
+        proof3 = ["", f"PROOF {m}: LOOPHOLE SCAN"] + [f"{item['level']} {item['text'][:200]}"
+                                                     for item in state["scan"] if item["level"] != "ok"]
+        proof3.append(f"ok {good} other scans passed (full list: python proof.py show {state['job']})")
+        text = "\n".join(head + changed + asked + proof1 + proof2 + library + proof3 + foot)
+    return text[:limit]
+
+
+# ---------------------------------------------------------------- verifying a receipt
+
+def verify(settings, number, given, text=None, recheck=False):
+    """Rebuild the receipt from the harness's files and say whether the posted one is genuine."""
+    job = job_dir(settings, number)
+    findings = []
+
+    def note(ok, good, bad):
+        findings.append(("ok" if ok else "BAD", good if ok else bad))
+
+    if not (job / "evidence.json").exists():
+        return False, f"NOT VERIFIED: job {number} has no finished evidence"
+    state = load_state(job)
+    evidence = json.loads((job / "evidence.json").read_text(encoding="utf-8"))
+    receipt = f"P{number}-{digest(evidence)[:12]}"
+    note(given == receipt, f"receipt {given} matches the evidence", f"receipt {given} does not match the evidence ({receipt})")
+    note(all(state.get(key) == evidence.get(key) for key in EVIDENCE), "job record agrees with the evidence",
+         "job record and evidence disagree")
+    sealed_ok = all((job / "sealed" / c["name"]).exists() and digest((job / "sealed" / c["name"]).read_bytes()) == c["sha256"]
+                    for c in evidence["checks"])
+    note(sealed_ok, "sealed checks are byte-for-byte what was run", "a sealed check was changed after the job")
+    ledger = settings.home / "ledger.jsonl"
+    entries = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()] if ledger.exists() else []
+    mine = [entry for entry in entries if entry["job"] == number]
+    position = entries.index(mine[-1]) if mine else -1
+    chained = bool(mine) and mine[-1]["receipt"] == receipt and evidence["previous"] == (
+        entries[position - 1]["receipt"] if position > 0 else None)
+    note(chained, "receipt is in the ledger, chained to the one before", "receipt is missing from the ledger or out of order")
+    if text is not None:
+        expected = render({**state, **evidence, "receipt": receipt})
+        match = letters(expected) in letters(text)
+        detail = ""
+        if not match:
+            for op, a1, a2, b1, b2 in difflib.SequenceMatcher(None, expected.split(), text.split(), autojunk=False).get_opcodes():
+                if op != "equal":
+                    detail = (f': the report says "...{" ".join(expected.split()[max(a1 - 3, 0):a2 + 2])}..." but the message '
+                              f'says "...{" ".join(text.split()[max(b1 - 3, 0):b2 + 2])}..."')
+                    break
+        note(match, "the message matches the report letter for letter", "the message is not the report" + detail)
+    if recheck:
+        now = snapshot(settings)
+        for check in evidence["checks"]:
+            result = run_check(settings, (job / "sealed" / check["name"]).read_bytes(), check["name"])
+            note(result["ok"] == check["after"]["ok"], f"{check['name']} gives the same result now",
+                 f"{check['name']} gives a different result now" + (" (the workspace changed since)" if now != evidence["after"] else ""))
+            then = (check["after"].get("exhaustive") or {}).get("map")
+            if then:
+                again = (result.get("exhaustive") or {}).get("map")
+                note(again == then, f"{check['name']} maps all {check['after']['exhaustive']['total']:,} inputs to the "
+                                    f"same outputs now (map {then})",
+                     f"{check['name']} maps its inputs to different outputs now (map {again}, was {then})")
+    trusted = all(status == "ok" for status, _ in findings)
+    lines = [f"{'VERIFIED' if trusted else 'NOT VERIFIED'}: receipt {given} for job {number} ({evidence['verdict']})"]
+    return trusted, "\n".join(lines + [f"{status:<3} {message}" for status, message in findings])
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Prove an agent's work. Settings come from .env next to this file.")
+    parser.add_argument("--env", default=str(Path(__file__).with_name(".env")))
+    commands = parser.add_subparsers(dest="action", required=True)
+    commands.add_parser("run", help="run a whole job with Codex").add_argument("request")
+    commands.add_parser("begin", help="step 1, for an agent that runs the steps itself").add_argument("request")
+    commands.add_parser("seal", help="step 3: seal and run the checks in proof_checks/").add_argument("job", type=int)
+    finish_parser = commands.add_parser("finish", help="step 5: prove it and print the report")
+    finish_parser.add_argument("job", type=int)
+    finish_parser.add_argument("--claim", default="")
+    commands.add_parser("show", help="print a job's report").add_argument("job", type=int)
+    verify_parser = commands.add_parser("verify", help="check a receipt, and optionally a posted message")
+    verify_parser.add_argument("job", type=int)
+    verify_parser.add_argument("receipt")
+    verify_parser.add_argument("--text", help="file with the posted message, or - for standard input")
+    verify_parser.add_argument("--recheck", action="store_true", help="run the sealed checks again now")
+    commands.add_parser("doctor", help="check that the sandbox can run the checks")
+    parser.add_argument("--workspace", help="folder the agent works in (overrides WORKSPACE)")
+    parser.add_argument("--home", help="where the harness keeps evidence (overrides PROOF_HOME)")
+    args = parser.parse_args()
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    env = load_env(args.env)
+    env.update({key: value for key, value in (("WORKSPACE", args.workspace), ("PROOF_HOME", args.home)) if value})
+    try:
+        settings = Settings.from_env(env)
+    except KeyError:
+        parser.exit(1, "Set WORKSPACE in .env or pass --workspace.\n")
+    except ValueError as error:
+        parser.exit(1, f"{error}\n")
+    settings.home.mkdir(parents=True, exist_ok=True)
+    if args.action in ("doctor", "run", "begin"):
+        ok, detail = sandbox_works(settings)
+        if args.action == "doctor" or not ok:
+            print(("OK: " if ok else "PROBLEM: the sandbox cannot run Python, so checks cannot run safely. ") + detail +
+                  ("" if ok else "\nSee 'Let the sandbox run Python' in README.md, or set CHECK_RUNNER=direct."))
+            sys.exit(0 if ok else 1)
+    try:
+        if args.action == "run":
+            print(run_job(settings, args.request, print)[1])
+        elif args.action == "begin":
+            print(f"job {begin(settings, args.request)}")
+        elif args.action == "seal":
+            for check in seal(settings, args.job):
+                print(f"{'EMPTY, already passes' if check['before']['ok'] else 'sealed, failing as it should'}: {check['name']}")
+            review = load_state(job_dir(settings, args.job)).get("review")
+            if review is not None:
+                print("Do the checks match what was asked? (a second AI's review)")
+                print("\n".join(review_lines(review)))
+            if review_gaps(review):
+                print(f"Part of the task is not tested as asked. Fix or add checks in {CHECK_DIR}/ and run seal again "
+                      "before doing the work, or the report will say UNPROVEN.")
+            if review_gaps(review, ("narrow",)):
+                print("Some checks try too few inputs. Make them test the rule over many inputs (a loop, or random "
+                      "inputs with a fixed seed) and run seal again before doing the work, or the report will warn.")
+        elif args.action == "finish":
+            print(finish(settings, args.job, args.claim)[1])
+        elif args.action == "show":
+            print((job_dir(settings, args.job) / "report.txt").read_text(encoding="utf-8"))
+        else:
+            text = None
+            if args.text == "-":
+                text = sys.stdin.buffer.read().decode("utf-8", "replace")
+            elif args.text:
+                text = Path(args.text).read_text(encoding="utf-8", errors="replace")
+            trusted, report = verify(settings, args.job, args.receipt, text, args.recheck)
+            print(report)
+            sys.exit(0 if trusted else 1)
+    except (RuntimeError, OSError, KeyError, ValueError) as error:
+        parser.exit(1, f"{error}\n")
+
+
+if __name__ == "__main__":
+    main()

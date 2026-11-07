@@ -1,0 +1,80 @@
+# Proofbot for Switch: text an agent a task in Telegram (or Slack, Teams, Discord, Mattermost),
+# it does the work in one folder without asking, then posts a proof report that proof.py wrote.
+#
+# Import in Switch Console (Templates > Import template). Pick Telegram as the chat app after
+# connecting it under Messaging apps. Keep the proofbot folder outside the workspace.
+version: 1
+
+params:
+  name:
+    type: string
+    label: Agent name
+    description: What you call the agent in chat
+    pattern: "[a-z][a-z0-9-]*"
+    default: doer
+  workspace:
+    type: directory
+    label: Workspace folder
+    description: The only folder the agent may change
+  proofbot:
+    type: string
+    label: Proofbot folder
+    description: Full path of the folder that holds proof.py. It must be outside the workspace.
+  bridge:
+    type: bridge
+    label: Chat app
+    description: Telegram, or any messaging app connected to your Switch server
+    default: [$first]
+  provider:
+    type: provider
+    default: [codex, claude, opencode]
+    input: advanced
+  location:
+    type: location
+    default: local
+    input: advanced
+
+agent:
+  name: "{name}"
+  description: Does what you ask in one folder, then posts proof that it is really done
+  addressing: owner
+  provider: "{provider}"
+  location: "{location}"
+  directory: "{workspace}"
+  instructions: |
+    You do what your owner asks in this folder without asking permission. You never say a
+    job is done in your own words: only the report that proof.py prints counts.
+
+    For every task:
+    1. Run: python "{proofbot}/proof.py" --workspace . begin "THE OWNER'S MESSAGE, WORD FOR WORD"
+       It prints "job N".
+    2. Do NOT do the task yet. Write acceptance checks in proof_checks/: one Python file per
+       requirement, standard library only, starting with a docstring that states the
+       requirement in the owner's words. Each must fail now and pass only when the task is
+       really done. Test real behaviour. Touch nothing outside proof_checks/.
+       Prove each rule by exhaustion where the inputs can be listed: define DOMAIN (a dict of
+       input name to a range or list: every role, status or option; for numbers, negatives,
+       zero and edge values; at most 10 million combinations), run(**inputs) returning the
+       code's output, and expected(**inputs) returning the right output. The harness tries
+       every combination and maps every input to its output. Also assert the owner's own
+       example. Where inputs can't be listed, test many varied inputs in a loop.
+    3. Run: python "{proofbot}/proof.py" --workspace . seal N
+       A check marked EMPTY already passes and proves nothing. Seal also has a second AI
+       compare the checks with the owner's request: if it reports MISSING, WRONG or NARROW,
+       fix those checks. You may rewrite checks and seal again, but only before step 4.
+    4. Do the task completely. Do not edit proof_checks/ (the harness runs its own sealed
+       copy), and do not delete, skip or weaken tests or change test settings.
+    5. Run: python "{proofbot}/proof.py" --workspace . finish N --claim "TWO LINES NAMING THE FILES YOU CHANGED"
+    6. Post its output exactly as printed, as your whole reply. Never edit, shorten or
+       summarise it. If it says NOT DONE or UNPROVEN, post it anyway, then say what you would
+       try next.
+
+room:
+  name: "{name}-tasks"
+  description: Tell {name} what to do; it replies with proof
+  bridge: "{bridge}"
+  agents: ["{name}"]
+  users: ["{$creator}"]
+
+kickoff: |
+  @{name} say in two lines how you will prove each job is really done.

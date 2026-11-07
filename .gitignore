@@ -1,0 +1,9 @@
+.env
+home/
+__pycache__/
+demo/project/
+demo/harness-home/
+demo/video/*.mp4
+demo/video/*.cmd
+demo/video/*.txt
+demo/video/telegram/
