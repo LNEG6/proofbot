@@ -18,6 +18,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import proof  # noqa: E402
 import readings  # noqa: E402
+import switchlink  # noqa: E402
 import whatsapp_bot  # noqa: E402
 
 CALC = "def add(a, b):\n    return a - b\n"
@@ -315,6 +316,87 @@ with tempfile.TemporaryDirectory() as directory:
         assert state["verdict"] == "NOT DONE", (cheat, report)
         assert "in separate processes" in report, (cheat, report)
     print("PASS: exiting early, forging a line of output, an object that equals anything and a patched loop are all caught.")
+
+    # 2g. Inside a Switch session the harness talks to the room itself, against a fake Switch server here.
+    posted, timeline = [], []
+
+    class FakeSwitch(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            allowed = self.headers.get("Authorization") == "Bearer swlr_test"
+            if self.path == "/agents/a1/message":
+                posted.append(body)
+                result = {"ok": True}
+            elif self.path == "/agents/a1/ops/list_rooms":
+                result = {"result": [{"room_id": "r1", "name": "proof-room"}, {"room_id": "r2", "name": "other"}]}
+            elif self.path == "/agents/a1/ops/get_room_detail":
+                result = {"result": {"agent_names": ["proof-doer", "proof-referee"], "connected_user_names": ["kim", "sam"]}}
+            elif self.path == "/agents/a1/ops/read_context":
+                result = {"result": {"threads": [{"root": entry, "replies": []} for entry in timeline]}}
+            else:
+                allowed = False
+            self.send_response(200 if allowed else 403)
+            self.end_headers()
+            self.wfile.write(json.dumps(result if allowed else {}).encode())
+
+        def log_message(self, *args):
+            pass
+
+    fake = ThreadingHTTPServer(("127.0.0.1", 0), FakeSwitch)
+    threading.Thread(target=fake.serve_forever, daemon=True).start()
+    link = {"SWITCH_API_ENDPOINT": f"http://127.0.0.1:{fake.server_address[1]}", "SWITCH_API_TOKEN": "swlr_test", "SWITCH_AGENT_ID": "a1"}
+
+    try:
+        switchlink.Room("proof-room", env={})
+        raise AssertionError("no session, so no room")
+    except switchlink.SwitchError as error:
+        assert "isn't running inside a Switch session" in str(error)
+    room = switchlink.Room("proof-room", env=link)
+    assert room.id == "r1"
+    for body, reply, want in (("A", "A", True), ("a.", "A", True), ("@proof-referee A", "A", True), ("A lot of it", "A", False),
+                              ("B", "A", False), ("option b", "B", True), ("keep them all please", "keep them", True)):
+        assert switchlink.says(body, reply) is want, (body, reply)
+    timeline[:] = [{"id": "m1", "kind": "message", "sender_name": "proof-doer", "body": "A", "timestamp": 5000},
+                   {"id": "m2", "kind": "message", "sender_name": "kim", "body": "A", "timestamp": 1000},
+                   {"id": "m3", "kind": "room_join", "sender_name": "sam", "body": "A", "timestamp": 6000}]
+    assert room.confirm("A", 2000) is None, "an agent's word, an old message or a join can't count as an answer"
+    timeline.append({"id": "m4", "kind": "message", "sender_name": "kim", "body": "a", "timestamp": 7000})
+    assert room.confirm("A", 2000)["id"] == "m4"
+
+    os.environ["FAKE_MODE"], os.environ["FAKE_READERS"] = "shop", "split"
+    folder = workspace(root, "direct")
+    (folder / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (folder / "shop.py").write_text("def price(subtotal, member, coupon):\n    return subtotal\n", encoding="utf-8")
+    (folder / "proof_checks").mkdir()
+    (folder / "proof_checks" / "check_price.py").write_text(BEST_CHECK, encoding="utf-8")
+
+    def cli(*args, session=link):
+        environment = {**os.environ, **session, "AGENT": "codex", "CHECK_RUNNER": "direct", "REVIEW": "off",
+                       "CODEX_COMMAND": f'"{sys.executable}" "{HERE / "fake_codex.py"}"'}
+        return subprocess.run([sys.executable, str(HERE.parent / "proof.py"), "--env", str(HERE / "no.env"), "--workspace", str(folder),
+                               "--home", str(root / "home_direct"), "--room", "proof-room", *args], capture_output=True, text=True, env=environment)
+
+    number = cli("begin", "Members get 10% off orders over $50, and coupons don't stack.").stdout.split()[-1]
+    posted.clear()
+    timeline.clear()
+    sealed = cli("seal", number)
+    assert "Posted to the room by the harness." in sealed.stdout, sealed.stdout + sealed.stderr
+    assert posted and posted[0]["room_id"] == "r1" and "WHAT DID YOU MEAN?" in posted[0]["content"], posted
+    refused = cli("answer", number, "q1", "B", "--who", "someone an AI made up")
+    assert refused.returncode == 1 and "Only a person's answer counts" in refused.stderr, refused
+    timeline.append({"id": "m9", "kind": "message", "sender_name": "kim", "body": "B", "timestamp": int(time.time() * 1000) + 1000})
+    answered = cli("answer", number, "q1", "B", "--who", "someone an AI made up")
+    assert "Recorded from kim:" in answered.stdout, answered.stdout + answered.stderr
+    state = proof.load_state(root / "home_direct" / "jobs" / number)
+    assert state["answers"][0]["who"] == "kim" and state["answers"][0]["confirmed"] == "m9", state["answers"]
+    assert "YOU DECIDED (kim, confirmed by Switch):" in "\n".join(proof.meaning_lines(state)), state["answers"]
+    alone = cli("seal", number, session={"SWITCH_API_ENDPOINT": "", "SWITCH_API_TOKEN": "", "SWITCH_AGENT_ID": ""})
+    assert alone.returncode == 0 and "WARN not connected to the Switch room" in alone.stdout, alone.stdout + alone.stderr
+    down = cli("seal", number, session={**link, "SWITCH_API_ENDPOINT": "http://127.0.0.1:9"})
+    assert down.returncode == 0 and "WARN not connected to the Switch room" in down.stdout, down.stdout + down.stderr
+    fake.shutdown()
+    print("PASS: inside Switch the harness posts its own verdict, only a person's answer counts, the name comes from "
+          "Switch, and a room it can't reach never stops a job.")
 
     # 3. Receipts: genuine, edited message, edited evidence.
     home_settings = settings(root, Path(honest["workspace"]))

@@ -25,9 +25,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import readings
+import switchlink
 
 CHECK_DIR = "proof_checks"
 MESSAGE_LIMIT = 4000  # WhatsApp allows 4096 characters per message
@@ -690,8 +692,10 @@ def retire(settings, job_number, check, inputs):
     (library_dir(settings) / "library.json").write_text(json.dumps(kept, indent=2), encoding="utf-8")
 
 
-def answer_question(settings, number, question_id, reply, who=""):
-    """Record what the person said. A letter picks an option; anything else is taken as their own words."""
+def answer_question(settings, number, question_id, reply, who="", confirmed=None):
+    """Record what the person said. A letter picks an option; anything else is taken as their own words.
+
+    `confirmed` is the message Switch reports for this answer, so the name comes from the room and not from an AI."""
     job = job_dir(settings, number)
     state = load_state(job)
     question = next((item for item in open_questions(state) if item["id"] == question_id), None)
@@ -700,6 +704,8 @@ def answer_question(settings, number, question_id, reply, who=""):
     reply = reply.strip()
     pick = next((option for option in question["options"] if option["label"] == reply.upper()), None)
     entry = {"check": question["check"], "inputs": question["inputs"], "ask": question["ask"], "reply": reply, "who": who}
+    if confirmed:
+        entry.update(who=confirmed["sender_name"], confirmed=confirmed.get("id") or True)
     entry["said"] = f"{question['ask']} {pick['says'] if pick else reply}"
     if pick and "output" in pick:
         entry["output"] = pick["output"]
@@ -753,7 +759,8 @@ def meaning_lines(state):
         lines.append("(these inputs can't be listed, so an AI compared the readings in words)")
         lines += [f"- {lens} read it as: {reader['assumes']}" for lens, reader in sorted(found.get("readers", {}).items())]
     for entry in state.get("answers") or []:
-        lines.append(f"YOU DECIDED{' (' + entry['who'] + ')' if entry.get('who') else ''}: {entry['said']}")
+        by = ", ".join(part for part in (entry.get("who"), "confirmed by Switch" if entry.get("confirmed") else "") if part)
+        lines.append(f"YOU DECIDED{' (' + by + ')' if by else ''}: {entry['said']}")
     for item in state.get("answer_results") or []:
         if not item["ok"]:
             lines.append(f"FAIL does not do what you decided: {item['said']} It gave {item['got']!r}.")
@@ -904,6 +911,8 @@ def relies_on(state):
             out.append("readings were compared on a random sample of the inputs, not all of them")
         if found.get("dropped"):
             out.append("a difference was not put to you; it is listed under NOT ASKED")
+    if state.get("answers") and not all(entry.get("confirmed") for entry in state["answers"]):
+        out.append("nothing confirmed who gave the answers to these questions")
     inside = [check["name"] for check in checks if not check.get("recheck")]
     if inside:
         out.append(f"{', '.join(inside)} ran in one process with the code, so it assumes the code did not tamper with it")
@@ -949,6 +958,7 @@ def seal(settings, number):
     state.update(sealed_tree=tree, checks=checks, strays=[item["path"] for item in strays],
                  review=review_checks(settings, job, state["request"], sealed))
     state["readings"] = read_meaning(settings, job, state, sealed)
+    state["asked_at"] = int(time.time() * 1000) - 5000  # only answers given after this count
     against = find_contradictions(settings, state, sealed)
     if against:
         state["readings"] = state["readings"] or {"ok": True, "mode": "compared", "statements": [], "conflicts": [],
@@ -1267,6 +1277,31 @@ def verify(settings, number, given, text=None, recheck=False):
     return trusted, "\n".join(lines + [f"{status:<3} {message}" for status, message in findings])
 
 
+class Tee:
+    """Prints as usual and keeps a copy, so the harness can post exactly what it printed."""
+
+    def __init__(self, stream):
+        self.stream, self.copy = stream, []
+
+    def write(self, text):
+        self.copy.append(text)
+        return self.stream.write(text)
+
+    def flush(self):
+        self.stream.flush()
+
+
+def connect(name):
+    """The Switch room, or None with a warning. A room that can't be reached must never stop a job."""
+    if not name:
+        return None
+    try:
+        return switchlink.Room(name)
+    except switchlink.SwitchError as error:
+        print(f"WARN not connected to the Switch room: {error}. Post this yourself.")
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Prove an agent's work. Settings come from .env next to this file.")
     parser.add_argument("--env", default=str(Path(__file__).with_name(".env")))
@@ -1298,10 +1333,14 @@ def main():
     answer_parser.add_argument("--who", default="", help="who answered")
     parser.add_argument("--workspace", help="folder the agent works in (overrides WORKSPACE)")
     parser.add_argument("--home", help="where the harness keeps evidence (overrides PROOF_HOME)")
+    parser.add_argument("--room", help="the Switch room to post to and read from, when running inside a Switch session")
+    parser.add_argument("--agent", help="the AI that reads requests: claude or codex (overrides AGENT)")
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     env = load_env(args.env)
     env.update({key: value for key, value in (("WORKSPACE", args.workspace), ("PROOF_HOME", args.home)) if value})
+    if args.agent in ("claude", "codex"):
+        env["AGENT"] = args.agent
     try:
         settings = Settings.from_env(env)
     except KeyError:
@@ -1315,6 +1354,10 @@ def main():
             print(("OK: " if ok else "PROBLEM: the sandbox cannot run Python, so checks cannot run safely. ") + detail +
                   ("" if ok else "\nSee 'Let the sandbox run Python' in README.md, or set CHECK_RUNNER=direct."))
             sys.exit(0 if ok else 1)
+    room = connect(args.room) if args.action in ("seal", "answer", "finish") else None
+    screen = sys.stdout
+    if room and args.action != "answer":
+        sys.stdout = Tee(screen)
     try:
         if args.action == "run":
             ask = (lambda text: input(text + "\nYour answer (a letter, or say what you meant): ")) if sys.stdin.isatty() else None
@@ -1352,8 +1395,18 @@ def main():
             state = load_state(job_dir(settings, args.job))
             print("\n".join(readings.question_text(item) for item in open_questions(state)) or "No open questions.")
         elif args.action == "answer":
-            entry = answer_question(settings, args.job, args.question, args.reply, args.who)
-            print(f"Recorded: {entry['said']}")
+            message = None
+            if room:
+                state = load_state(job_dir(settings, args.job))
+                try:
+                    message = room.confirm(args.reply, state.get("asked_at", 0))
+                except switchlink.SwitchError as error:
+                    print(f"WARN couldn't read the Switch room: {error}. Recording the answer without confirming it.")
+                else:
+                    if message is None:
+                        parser.exit(1, f"Refused: no person in the room has said \"{args.reply}\". Only a person's answer counts.\n")
+            entry = answer_question(settings, args.job, args.question, args.reply, args.who, message)
+            print(f"Recorded{' from ' + entry['who'] if message else ''}: {entry['said']}")
             left = open_questions(load_state(job_dir(settings, args.job)))
             print("\n".join(readings.question_text(item) for item in left) if left else
                   "All answered. Update the checks to match, then seal again.")
@@ -1372,6 +1425,14 @@ def main():
             sys.exit(0 if trusted else 1)
     except (RuntimeError, OSError, KeyError, ValueError) as error:
         parser.exit(1, f"{error}\n")
+    if isinstance(sys.stdout, Tee):
+        text = "".join(sys.stdout.copy)
+        sys.stdout = screen
+        try:
+            room.post(text)
+            print("Posted to the room by the harness.")
+        except switchlink.SwitchError as error:
+            print(f"WARN couldn't post to the Switch room: {error}. Post this yourself.")
 
 
 if __name__ == "__main__":

@@ -55,8 +55,10 @@ Switch isn't an agent. It's what lets coding agents sit in a team chat as member
 | --- | --- |
 | **Room documents** | The team's decisions live in the room. Every agent that joins reads them, so a brand-new agent already knows what Kim decided. An agent can only edit a document it created, so `doer` can't change the record |
 | **Targeted messages** | A question goes to the person who decided, not to whoever happened to type |
-| **Sender identity** | Every decision carries the name Switch reports, not a name an AI read from the text |
+| **Sender identity** | [switchlink.py](switchlink.py) reads the room's history itself. An answer only counts if Switch shows a person said it, and the name on the decision is the one Switch reports |
+| **Direct posting** | The harness posts its own verdict to the room, using the session Switch gives the agent, so no AI can retype or soften it |
 | **Separate room members** | `doer` and `referee` have their own folders, so the agent doing the work isn't the one announcing the result |
+| **Any agent in one room** | Claude Code does the work and Codex referees by default, so they don't share blind spots. Without Switch you'd have to wire that up yourself |
 | **People and agents in one chat** | Two people can disagree and it notices. Priya can't quietly undo what Kim decided, because the room sees the conflict before any work starts |
 - **One import sets it all up.** [proofbot.template.yaml](proofbot.template.yaml) creates both agents and the room, and each agent runs on whichever coding agent you pick: Claude Code, Codex or OpenCode.
 
@@ -222,7 +224,7 @@ A report opens with one of **DONE AND PROVEN**, **DONE, READ THE WARNINGS**, **N
 - **A correction is only as strong as its check.** If the check misses the mistake, the mistake can come back. What you decided is also given to the agent as a rule, but only the checks enforce it.
 - **Only listable inputs are measured.** Free text and how a page looks fall back to an AI comparing readings in words.
 - **The room document is a copy.** Agents read it, but only the harness enforces it, and that needs the `referee` to keep it up to date.
-- **The AI steps can be wrong.** The review and the last check are judgements. In a Switch room, `referee` is also an AI passing on the harness's output, so "only a person's answer counts" is its instruction, not something code enforces.
+- **The AI steps can be wrong.** The review and the last check are judgements. With `--room`, the harness checks answers against Switch itself. Without a Switch session it can't, and the report says nothing confirmed who answered.
 - **On one computer, the folders aren't a wall.** An agent that can write to the proofbot folder could forge job files that `verify` accepts, because receipts aren't signed. Proofbot blocks this when run directly: with Claude Code the agent gets file tools limited to the workspace, and Codex has its sandbox. Inside a Switch room, check how your agent is confined.
 - **Code can still tell it's being tested.** Code that detects the harness and behaves differently would pass. THIS PROOF RELIES ON says so. Checks without a DOMAIN run in one process with the code, and the report names them.
 - **With Claude Code, checks run as you.** The sandbox comes from Codex, so AI-written checks run with your full access unless you use `AGENT=codex`.
