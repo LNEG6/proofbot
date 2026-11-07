@@ -49,12 +49,15 @@ The hackathon calls this a workflow, which only means who does what, in what ord
 
 ## Why it needs Switch
 
-A terminal has one person in it. Decisions belong to a team, so this only works in a room:
+Switch isn't an agent. It's what lets coding agents sit in a team chat as members, next to people. A terminal has one person in it, and decisions belong to a team, so Proofbot is built on what a room gives you:
 
-- **The right person gets asked.** Proofbot remembers who decided what, so a question goes to them, not to whoever happened to type the request.
-- **Two people can disagree, and it notices.** Priya can't quietly undo what Kim decided, because the room sees the conflict before any work starts.
-- **Every answer has a name on it,** because a room knows who said what.
-- **Two agents, not one.** `doer` and `referee` are separate room members with separate folders, so the agent doing the work isn't the one announcing the result.
+| Switch feature | What Proofbot uses it for |
+| --- | --- |
+| **Room documents** | The team's decisions live in the room. Every agent that joins reads them, so a brand-new agent already knows what Kim decided. An agent can only edit a document it created, so `doer` can't change the record |
+| **Targeted messages** | A question goes to the person who decided, not to whoever happened to type |
+| **Sender identity** | Every decision carries the name Switch reports, not a name an AI read from the text |
+| **Separate room members** | `doer` and `referee` have their own folders, so the agent doing the work isn't the one announcing the result |
+| **People and agents in one chat** | Two people can disagree and it notices. Priya can't quietly undo what Kim decided, because the room sees the conflict before any work starts |
 - **One import sets it all up.** [proofbot.template.yaml](proofbot.template.yaml) creates both agents and the room, and each agent runs on whichever coding agent you pick: Claude Code, Codex or OpenCode.
 
 Switch Trust checks what agents *say*. Proofbot checks what they *did*, and whether it's what your team decided.
@@ -218,6 +221,7 @@ A report opens with one of **DONE AND PROVEN**, **DONE, READ THE WARNINGS**, **N
 - **Readers agreeing doesn't prove the meaning.** It makes a misunderstanding less likely, and the report says so. A reader can miss an input, and models share blind spots.
 - **A correction is only as strong as its check.** If the check misses the mistake, the mistake can come back. What you decided is also given to the agent as a rule, but only the checks enforce it.
 - **Only listable inputs are measured.** Free text and how a page looks fall back to an AI comparing readings in words.
+- **The room document is a copy.** Agents read it, but only the harness enforces it, and that needs the `referee` to keep it up to date.
 - **The AI steps can be wrong.** The review and the last check are judgements. In a Switch room, `referee` is also an AI passing on the harness's output, so "only a person's answer counts" is its instruction, not something code enforces.
 - **On one computer, the folders aren't a wall.** An agent that can write to the proofbot folder could forge job files that `verify` accepts, because receipts aren't signed. Proofbot blocks this when run directly: with Claude Code the agent gets file tools limited to the workspace, and Codex has its sandbox. Inside a Switch room, check how your agent is confined.
 - **Code can still tell it's being tested.** Code that detects the harness and behaves differently would pass. THIS PROOF RELIES ON says so. Checks without a DOMAIN run in one process with the code, and the report names them.
@@ -237,6 +241,7 @@ python proof.py begin "your task"          # step 1, for an agent that runs the 
 python proof.py begin "what went wrong" --correction   # a correction: it becomes a check that binds later jobs
 python proof.py seal 3                     # seal the checks, spread the readers, print any questions
 python proof.py questions 3                # what still needs answering
+python proof.py decisions                  # what this team has decided, for the room document
 python proof.py answer 3 q1 B --who kim    # record a person's answer: a letter, or their own words
 python proof.py begin "your task" --who sam   # say who asked
 python proof.py finish 3 --claim "..."     # prove it and print the report

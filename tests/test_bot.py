@@ -252,6 +252,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert "Changed what owner decided in job" in report, report
 
     shared, folder, number = team("team_keep", "A")  # the decision stands, so the new check has to change
+    assert "owner decided, in job" in proof.decisions_text(shared), proof.decisions_text(shared)
     proof.seal(shared, number)
     state = proof.load_state(proof.job_dir(shared, number))
     assert "still disagrees with your answer" in " ".join(state["readings"]["conflicts"]), state["readings"]

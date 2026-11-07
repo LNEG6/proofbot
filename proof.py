@@ -634,6 +634,14 @@ def open_questions(state):
     return (state.get("readings") or {}).get("questions", [])
 
 
+def decisions_text(settings):
+    """The team's record, written for a Switch room document that every agent in the room reads when it joins."""
+    decided = load_decisions(settings)
+    if not decided:
+        return "Nothing has been decided yet."
+    return "\n".join(f"- {entry.get('who') or 'someone'} decided, in job {entry['job']}: {entry['said']}" for entry in decided)
+
+
 def owner_of(settings, params):
     """Who settled this before? Questions go to the person who knows, not to whoever happened to type the request."""
     for decision in reversed(load_decisions(settings)):
@@ -1282,6 +1290,7 @@ def main():
     verify_parser.add_argument("--recheck", action="store_true", help="run the sealed checks again now")
     commands.add_parser("doctor", help="check that the sandbox can run the checks")
     commands.add_parser("questions", help="print what the person still needs to answer").add_argument("job", type=int)
+    commands.add_parser("decisions", help="print what this team has decided, for the room document")
     answer_parser = commands.add_parser("answer", help="record the person's answer to a question")
     answer_parser.add_argument("job", type=int)
     answer_parser.add_argument("question", help="the question's id, such as q1")
@@ -1337,6 +1346,8 @@ def main():
                 print("STOP. The checks disagree with what the person decided. Fix them, then seal again.")
             else:
                 print("One meaning. Work can start.")
+        elif args.action == "decisions":
+            print(decisions_text(settings))
         elif args.action == "questions":
             state = load_state(job_dir(settings, args.job))
             print("\n".join(readings.question_text(item) for item in open_questions(state)) or "No open questions.")
