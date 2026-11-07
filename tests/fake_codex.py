@@ -1,6 +1,6 @@
 """Stands in for `codex exec` in tests. FAKE_MODE picks how the agent behaves: honestly, or one of the cheats.
 FAKE_REVIEW picks what the second AI says about the checks: ok, missing (a part of the request is untested) or garbage.
-FAKE_READERS picks what the readers do: agree (default), split (the rival finds a second meaning), words (no code)."""
+FAKE_READERS picks what the readers do: agree (default), split (the bold reader finds a second meaning), words (no code)."""
 import json
 import os
 import re
@@ -23,8 +23,8 @@ SHOP_CHECK = ('"""Members get 10% off orders over $50, and coupons don\'t stack.
               'def expected(subtotal, member, coupon):\n    ')
 
 
-def reading(formula, assumes):
-    return f"ASSUMES: {assumes}\n```python\nEXTRA = {{}}\ndef expected(subtotal, member, coupon):\n    {formula}```\n"
+def reading(formula, assumes, signature="subtotal, member, coupon"):
+    return f"ASSUMES: {assumes}\n```python\nEXTRA = {{}}\ndef expected({signature}):\n    {formula}```\n"
 
 
 if "You are one of several readers" in prompt:
@@ -34,7 +34,14 @@ if "You are one of several readers" in prompt:
     if not names:
         reply = "NO OTHER READING" if readers != "words" else (
             f"ASSUMES: {lens} reading\nDELIVERS: {lens} result\nLEAVES ALONE: nothing")
-    elif lens == "rival" and readers == "split" and not settled:
+    elif "days_inactive" in prompt:
+        bold = (lens == "bold" and readers == "split" and not settled) or "Remove accounts" in prompt
+        says = "delete" if bold else "disable"
+        reply = f"### {names[0]}\n" + reading(
+            f'return "{says}" if days_inactive >= 365 and not paying else "keep"\n',
+            "Inactive accounts get deleted for good." if bold else "Inactive accounts get disabled. Nothing is deleted.",
+            "days_inactive, paying")
+    elif lens == "bold" and readers == "split" and not settled:
         reply = f"### {names[0]}\n" + reading(REPLACE, "A coupon replaces the member discount.")
     elif "REPLACE_ME" in prompt or (settled and readers == "split"):
         reply = f"### {names[0]}\n" + reading(REPLACE, "A coupon replaces the member discount.")
@@ -43,7 +50,10 @@ if "You are one of several readers" in prompt:
     else:
         reply = "\n".join(f"### {name}\nNO OTHER READING" for name in names)
 elif "You are the last check" in prompt:
-    if readers == "words":
+    if "days_inactive" in prompt:
+        reply = json.dumps({"questions": [{"id": "q1", "worth_asking": True, "ask": "What should happen to inactive accounts?",
+                                           "options": {"A": "Disable them. Delete nothing", "B": "Delete them for good"}, "why": ""}]})
+    elif readers == "words":
         reply = json.dumps({"questions": [{"ask": "Delete old logs, or just tidy them?",
                                            "options": {"A": "Delete them", "B": "Tidy them and keep them"}}]})
     else:

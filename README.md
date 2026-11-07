@@ -1,37 +1,47 @@
 # Proofbot
 
-Agents act on their guess of what you meant, and you only find out it was wrong after the work is done. A wrong guess feels the same to the agent as a right one, so it goes ahead confidently.
+**A teammate in your group chat that asks the right person, and never forgets the answer.**
 
-Proofbot fixes that in a [Switch](https://github.com/sandbox-quantum/switch) room, where a solo coding agent becomes a teammate you can trust. People say what they want, an agent does the work, and a referee settles the two things nobody should take on faith: **what you meant**, and **whether it's really done**.
+Agents act on their guess of what you meant, and you only find out it was wrong after the work is done. A wrong guess feels the same to the agent as a right one, so it goes ahead confidently. On a team it's worse: the agent asks whoever typed, not whoever decided, and by next week it has forgotten the answer.
 
-![Random paths from one request: two agents explore opposite readings, and a last agent checks every path](docs/monte-carlo.png)
+Proofbot fixes that in a [Switch](https://github.com/sandbox-quantum/switch) room. Two agents read your request from opposite ends. If they disagree, the room gets one plain question before any work starts. The answer is saved with the name of the person who gave it, it becomes a check the code has to pass, and no later job can quietly undo it.
 
-Ask an AI to capitalize a customer's name and it might write `John smith`. The tests pass, the agent says "done", and you find out later that it wasn't what you meant. Proofbot asks first:
+![Paths fan out from one sentence between a cautious agent and a bold agent. When a person answers, the wrong outcomes are struck out and one line is left](docs/what-it-fixes.png)
+
+*An illustration. Each line is one thing the sentence could mean. The real question comes before any work starts.*
 
 ```text
-you      @proof-doer Capitalize the customer's name on the invoice.
-referee  q1: How should the customer's name look on the invoice?
-           A: Only the very first letter in capitals ("john smith" becomes "John smith")
-           B: The first letter of each word in capitals ("john smith" becomes "John Smith")
-           C: The whole name in capitals ("john smith" becomes "JOHN SMITH")
-you      B
+sam      @proof-doer Clean up inactive users.
+referee  q1: Someone who doesn't pay hasn't used the product for exactly one year.
+             What should happen to their account?
+           A: Turn the account off, but keep it so it can be turned back on later
+           B: Leave it alone for now, because only accounts inactive for more than a year count
+           C: Delete the account for good
+kim      A
+
+         ...a week later...
+
+priya    @proof-doer Remove accounts nobody has used in a year. We need the space.
+referee  d1 (for kim): This goes against what kim decided in job 1. Keep that, or change it?
+           A: Keep what kim decided
+           B: Change it. The new request wins
 ```
 
-That question came word for word from a real Claude Code run in the terminal, and no work started until it was answered.
+The questions above came from a real run through the harness with Claude Code in the terminal. The second is shortened, and no work started until each one was answered.
 
-## The workflow
+## How it works
 
-![What Proofbot does: three readers, code that compares them, a person who settles it, and a harness that decides](docs/how-it-works.png)
+![The steps: you ask, a cautious and a bold agent read it, code compares them, a person answers if they disagree, the doer works, and the harness decides](docs/how-it-works.png)
 
-A workflow is who does what, in what order. In this room:
+The hackathon calls this a workflow, which only means who does what, in what order:
 
 | Step | Who | What happens |
 | --- | --- | --- |
 | 1 | A person | Asks for something in the team chat |
 | 2 | `doer` | Writes its reading of the request as checks, before touching any code |
-| 3 | Three readers | Each read the request from a different side and turn their reading into code |
-| 4 | The harness (no AI) | Runs every reading on every input and groups the ones that behave the same |
-| 5 | `referee` | One meaning: work starts and nobody is bothered. More than one: it asks the room |
+| 3 | Two agents | One reads the request as cautiously as it can, the other as boldly as it can |
+| 4 | The harness (no AI) | Runs both readings on every input, and runs every earlier decision against the new checks |
+| 5 | `referee` | If everything agrees, work starts and nobody is bothered. If not, it asks the person who decided before, or whoever asked |
 | 6 | A person | Answers with a letter or in their own words. The answer binds the checks and the code |
 | 7 | `doer` | Does the work |
 | 8 | The harness | Reruns everything from its own sealed copy and scans for cheating |
@@ -39,14 +49,15 @@ A workflow is who does what, in what order. In this room:
 
 ## Why it needs Switch
 
-The hard part of proving work was done is agreeing on what "done" means, and that's a conversation between people. Switch is where it happens:
+A terminal has one person in it. Decisions belong to a team, so this only works in a room:
 
-- **The room is where meaning gets settled.** A job can't reach DONE while a question is open, and the answer can only come from a person in the chat. That rule is [proved in Lean](lean/Gate.lean).
+- **The right person gets asked.** Proofbot remembers who decided what, so a question goes to them, not to whoever happened to type the request.
+- **Two people can disagree, and it notices.** Priya can't quietly undo what Kim decided, because the room sees the conflict before any work starts.
+- **Every answer has a name on it,** because a room knows who said what.
 - **Two agents, not one.** `doer` and `referee` are separate room members with separate folders, so the agent doing the work isn't the one announcing the result.
-- **The whole team can answer.** The product manager can settle what a rule means without opening a terminal.
 - **One import sets it all up.** [proofbot.template.yaml](proofbot.template.yaml) creates both agents and the room, and each agent runs on whichever coding agent you pick: Claude Code, Codex or OpenCode.
 
-Switch Trust checks what agents *say*. Proofbot checks what they *did*, and whether it's what you meant.
+Switch Trust checks what agents *say*. Proofbot checks what they *did*, and whether it's what your team decided.
 
 ## Run it in Switch
 
@@ -71,6 +82,7 @@ git clone https://github.com/qunatumstuff/proofbot
 These need no setup, and each builds its own scratch project:
 
 ```powershell
+python demo/lazy_agent.py team            # a clear request goes against what a teammate decided, and it stops
 python demo/lazy_agent.py meaning         # one sentence, two meanings: the readers split and a person settles it
 python demo/lazy_agent.py everyday        # a permissions rule, every combination tried
 python demo/lazy_agent.py regress         # a later job breaks something proven earlier
@@ -78,7 +90,7 @@ python demo/lazy_agent.py cheat           # the agent edits a test, then forges 
 python tests/test_bot.py                  # fake agents try every cheat. No network needed
 ```
 
-The readers in `demo/lazy_agent.py meaning` are scripted so it runs anywhere. To use real ones on your own project, copy `.env.example` to `.env`, set `WORKSPACE` and `TEST_COMMAND`, then run:
+The readers in `team` and `meaning` are scripted so they run anywhere. To use real ones on your own project, copy `.env.example` to `.env`, set `WORKSPACE` and `TEST_COMMAND`, then run:
 
 ```powershell
 python proof.py run "Capitalize the customer's name on the invoice."
@@ -86,47 +98,52 @@ python proof.py run "Capitalize the customer's name on the invoice."
 
 ## Catching misunderstandings
 
-![Random paths from one sentence to the different things it could mean](docs/meaning-paths.png)
-
-A request is one sentence, but the person's meaning could be any of several. Two AIs that simply read it tend to make the same silent guess. In a small test, two models read five product requests separately and never disagreed on any of 215 inputs, including requests that really were ambiguous.
-
-So [readings.py](readings.py) spreads the readers apart on purpose, like sampling different paths through what you might have meant:
+A request is one sentence, but the person's meaning could be anywhere on a spectrum. So [readings.py](readings.py) sends one reader to each end:
 
 | Reader | How it reads |
 | --- | --- |
-| `literal` | The exact words, nothing added |
-| `intent` | The outcome you want, including what you'd obviously expect |
-| `rival` | Must find a different reasonable meaning from the agent's, or say there isn't one |
+| `cautious` | The least the words could mean, and nothing that can't be undone |
+| `bold` | The most the words could reasonably mean, finished the way you'd want it |
 
-Each reading becomes a real `expected()` function, and readers can add inputs the agent forgot, of the same kind as the ones listed. Then the harness runs them all. Two readings are the same meaning if they give the same output on every input, so this is a measurement, not an AI's opinion. It picks the fewest inputs that tell the meanings apart, up to 5,000 inputs and then a fixed random sample.
+If both ends agree, everything between them agrees too, so nobody gets asked. Each reading becomes a real `expected()` function, and the harness runs both on every input. Two readings are the same meaning if they give the same output every time, so this is a measurement, not an AI's opinion. Past 5,000 inputs it takes a fixed random sample.
 
-A last AI turns those inputs into plain questions. It can set a silly difference aside, and the report lists that under NOT ASKED, but it can never pick the answer. If it sets one aside and every reader disagrees with the agent, the agent has to fix its checks.
+A last AI turns any difference into a plain question. It can set a silly one aside, and the report lists that under NOT ASKED, but it can never pick the answer. If it sets one aside and both readers disagree with the agent, the agent has to fix its checks. A job asks three questions at most, however many rounds it takes, and anything past that goes in the report.
 
-A job asks at most three questions in all, however many rounds it takes, and anything past that goes in the report. Your answers are remembered for that workspace, so the team only gets asked once. When inputs can't be listed, like "clean up the logs", readers answer in words and an AI compares them. The report says so, because that's a judgement, not a measurement.
+When inputs can't be listed, like "clean up the logs", readers answer in words and an AI compares them. The report says so, because that's a judgement, not a measurement.
+
+### What your team decided stays decided
+
+This is the part a prompt can't do.
+
+Each answer is saved with who gave it. Before any new work starts, the harness runs every earlier decision against the new checks. A request that goes against one stops, and the person who decided gets asked. They can keep their decision, or change it, which retires the old proof. Later questions on the same inputs go to the same person.
+
+Decisions and proven checks bind every later job, in any session, with any agent. A correction works the same way: `begin --correction` starts a job whose check must fail on the old behaviour, so it can't end in an apology.
 
 ### What real models did
 
-These are real runs. The check in each of the first four rows was written by hand to be careless on purpose, and those four ran on both Claude Code and Codex. The last three ran on Codex, with a correct check.
+These are real runs with Claude Code. The check in the first four rows was written by hand to be careless on purpose, and the last three were correct.
 
 | Request | Result |
 | --- | --- |
-| "Capitalize the customer's name on the invoice." | Asked: `John smith`, `John Smith` or `JOHN SMITH`? |
-| "Members get 10% off orders over $50, and coupons don't stack." | Found 4 meanings and asked, including whether a coupon is a percent or dollars |
-| "Clean up the logs." | Asked: clearer logging, or delete old files? |
-| "Fix add in calc.py, add(2, 3) should return 5." (the check returned 5 for everything) | Every reader disagreed, so the agent had to fix its check |
-| "Flag an invoice as overdue once it's more than 30 days old, unless it's been paid." | One meaning, nobody asked |
+| "Capitalize the customer's name on the invoice." | Asked what to do with a name typed in capitals |
+| "Members get 10% off orders over $50, and coupons don't stack." | Found 3 meanings and asked whether a coupon is a percent or dollars |
+| "Clean up the logs." | Asked whether to touch the logging in the code too |
+| "Fix add in calc.py, add(2, 3) should return 5." (the check returned 5 for everything) | Both readers disagreed, so the agent had to fix its check |
 | "Fix add in calc.py so it adds two numbers." | One meaning, nobody asked |
-| "Only admins and the post's author can delete a post. Banned users can't do anything." | Nobody asked in one run. In another, it asked whether a banned user gets "not allowed" or an error |
+| "Only admins and the post's author can delete a post. Banned users can't do anything." | One meaning, nobody asked |
+| "Flag an invoice as overdue once it's more than 30 days old, unless it's been paid." | Asked about future dates, which it shouldn't have. Readers are now told to stick to inputs that can happen |
 
-One whole job on Claude Code, start to finish, asked two questions, built the right thing, and ended DONE, READ THE WARNINGS because the test project had no test suite. It took about 13 minutes: each round of readers takes about a minute, and the agent's own work takes the rest.
-
-That's a handful of requests, not a benchmark, and the AI steps don't give the same answer every time.
+One whole job, with the agent also doing the work, asked two questions, built the right thing, and ended DONE, READ THE WARNINGS because the test project had no test suite. It took about 13 minutes. That's a handful of requests, not a benchmark, and the AI steps don't give the same answer every time.
 
 ### Why not just tell the agent to ask?
 
-You should. We tested it on the seven requests above. Told only "if anything is unclear, ask", Claude Code asked good questions on all three ambiguous requests and said PROCEED on the other four, in seconds. Left alone, it picked a meaning silently on all three and said it hadn't run anything. So spotting ambiguity is the cheap part, and our readers are much slower than that one line.
+You should. Told only "if anything is unclear, ask", Claude Code asked good questions on the three ambiguous requests above and said PROCEED on the other four, in seconds. Left alone, it picked a meaning silently on all three. So spotting ambiguity is the cheap part, and our readers are much slower than that one line.
 
-What a prompt can't do is make the answer stick. The agent can still get it wrong in code, say "done", and forget by the next session. The readers earn their keep because each option comes with an exact input and output, so your answer becomes a check. The code has to pass it in a process it can't tamper with, in this job and every later one.
+What a prompt can't do:
+
+- **Ask the right person.** On "Remove accounts nobody has used in a year", it asked the person who typed in 5 of 5 tries. It had no way to know a teammate had already decided.
+- **See a decision the code doesn't show.** On a clear request that undid an earlier decision about discounts, it said PROCEED in 2 of 3 tries.
+- **Make the answer stick.** It can still get it wrong in code, say "done", and forget by the next session. Here, each option comes with an exact input and output, so the answer becomes a check the code has to pass, in a process it can't tamper with, in this job and every later one.
 
 ### Three mistakes that shaped this
 
@@ -136,7 +153,7 @@ An AI assistant made all three of these while we were building Proofbot.
 | --- | --- |
 | Asked for a Monte Carlo chart, "more spread out", it drew a different kind of map. The extra words replaced the main request. | The review treats the main thing you asked for as its own part, so checks that keep the description but lose the thing fail. |
 | Corrected about an example, it explained itself, then used the same example again. | A correction is a new job. It needs a check that fails on the old behaviour, and that check binds every later job. |
-| Asked how to stop this happening, it patched the one example. | A correction has to cover the whole kind of mistake, and the intent reader treats your examples as examples of a rule. |
+| Asked how to stop this happening, it patched the one example. | A correction has to cover the whole kind of mistake, and the bold reader treats your examples as examples of a rule. |
 
 A wrong guess and a right one feel the same to an agent, so being told off doesn't change anything by itself. A check that has to keep passing does.
 
@@ -167,7 +184,7 @@ Other projects bring Lean to agents too. [Lean4Agent](https://arxiv.org/abs/2606
 1. **Before:** the harness snapshots the workspace and runs your tests and every check in the proven library.
 2. **Checks first:** the agent writes acceptance checks in `proof_checks/`, without doing the task.
 3. **Seal:** the harness copies those checks outside the agent's folder and runs them. They must fail now, because a check that already passes proves nothing.
-4. **Readers and review:** readers look for other meanings, and a second AI says which check tests each part of your request.
+4. **Readers and review:** readers look for other meanings, earlier decisions run against the new checks, and a second AI says which check tests each part of your request.
 5. **Questions:** people settle anything left open, the agent updates its checks, and step 3 runs again.
 6. **Work:** the agent does the task.
 7. **Proof:** the harness reruns its sealed copy of the checks, your tests and the library, compares the code with what you decided, diffs the workspace, and scans for cheating. Then it writes the report and a receipt ID.
@@ -177,7 +194,8 @@ A report opens with one of **DONE AND PROVEN**, **DONE, READ THE WARNINGS**, **N
 
 | How an agent goes wrong | What catches it |
 | --- | --- |
-| Reads you too literally, or picks one meaning silently | Readers split, and it stops for a question |
+| Reads you too literally, or picks one meaning silently | The two readers split, and it stops for a question |
+| Quietly undoes what a teammate decided | Earlier decisions run against the new checks, and it stops before any work |
 | Keeps the description but loses the main thing you asked for | The review marks that part wrong |
 | Gets corrected, then repeats the mistake | The correction's check is in the proven library: NOT DONE |
 | Keeps its own reading after you answered | The harness compares its checks with your answer |
@@ -204,7 +222,8 @@ A report opens with one of **DONE AND PROVEN**, **DONE, READ THE WARNINGS**, **N
 - **On one computer, the folders aren't a wall.** An agent that can write to the proofbot folder could forge job files that `verify` accepts, because receipts aren't signed. Proofbot blocks this when run directly: with Claude Code the agent gets file tools limited to the workspace, and Codex has its sandbox. Inside a Switch room, check how your agent is confined.
 - **Code can still tell it's being tested.** Code that detects the harness and behaves differently would pass. THIS PROOF RELIES ON says so. Checks without a DOMAIN run in one process with the code, and the report names them.
 - **With Claude Code, checks run as you.** The sandbox comes from Codex, so AI-written checks run with your full access unless you use `AGENT=codex`.
-- If you change a requirement on purpose, delete its file in `home/library/` and its line in `library.json`, or every later job will be NOT DONE.
+- A contradiction is only found before the work when the new check takes the same inputs as the earlier decision. Otherwise the proven library catches it at the end, as NOT DONE.
+- To change a requirement that came from a decision, answer B to the contradiction. For any other proven check, delete its file in `home/library/` and its line in `library.json`.
 - The harness snapshots the workspace with git and runs `git init` if the folder has none. It never commits or changes your branch.
 - Jobs run one at a time. A task that is a question, not a change, comes back UNPROVEN, because there's nothing to check.
 - `python proof.py run` with nobody at the keyboard can't ask you anything. The agent then works on its best reading, and the job ends UNPROVEN.
@@ -219,6 +238,7 @@ python proof.py begin "what went wrong" --correction   # a correction: it become
 python proof.py seal 3                     # seal the checks, spread the readers, print any questions
 python proof.py questions 3                # what still needs answering
 python proof.py answer 3 q1 B --who kim    # record a person's answer: a letter, or their own words
+python proof.py begin "your task" --who sam   # say who asked
 python proof.py finish 3 --claim "..."     # prove it and print the report
 python proof.py show 3                     # a job's report
 python proof.py verify 3 P3-... --recheck  # is the receipt genuine, and do the checks still pass?

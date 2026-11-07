@@ -1,19 +1,18 @@
 """What did the person actually mean?
 
-AI agents take words too literally, and two AIs asked the same thing tend to make the same silent guess, so a
-second opinion stays quiet exactly when it matters. So the readers here are spread apart on purpose:
+AI agents take words too literally, and two AIs asked the same thing tend to make the same silent guess. So two readers
+are sent to opposite ends of what the request could mean:
 
-- literal reads the exact words and adds nothing.
-- intent reads for the outcome the person wants.
-- rival must find a different reasonable meaning from the one the agent chose, or say there is none.
+- cautious reads it as the least the words could mean, and nothing that can't be undone.
+- bold reads it as the most the words could reasonably mean.
 
-Each reading is turned into code, then the harness (no AI) runs every reading on every input and groups the ones
-that behave the same. Each group is one meaning. If there is one meaning, nobody is bothered. If there are more, the
-harness picks the fewest inputs that tell them apart and the last AI words them as questions for the person.
-It may say a difference isn't worth asking about, but that is written down in the report. It never picks the answer.
+If both ends agree, everything between them agrees too, so nobody needs to be asked. Each reading is turned into code,
+then the harness (no AI) runs both on every input. If they differ, the harness picks the fewest inputs that show the
+difference and a last AI words them as questions for the person. It may say a difference isn't worth asking about, but
+that is written down in the report, and it never picks the answer.
 
-When inputs can't be listed (free text, how a page looks), readers answer in words instead and the last AI compares
-them. That comparison is a judgement, not a measurement, and the report says so.
+When inputs can't be listed (how a page looks, say), readers answer in words and the last AI compares them. That
+comparison is a judgement, not a measurement, and the report says so.
 """
 import ast
 import itertools
@@ -28,16 +27,11 @@ COLUMN_LIMIT = 400      # most values kept from one input's range
 QUESTION_LIMIT = 3      # for a whole job, however many rounds it takes; the rest go in the report
 
 LENSES = {
-    "literal": "Read it like a strict lawyer or a computer. Take every word exactly as written and add nothing that "
-               "was not said. Where the words leave something open, do the least the words require. Treat examples "
-               "as the only cases mentioned.",
-    "intent": "Read it like a sensible colleague who knows why the person is asking. Work out the outcome they "
-              "actually want. Include what they would obviously expect even though they didn't say it, and treat "
-              "their examples as examples of a general rule, not as the whole rule.",
-    "rival": "Below is how the agent read the request. Find the most plausible DIFFERENT meaning a reasonable person "
-             "could really have had. It must behave differently on at least one realistic input. Do not invent "
-             "requirements the words can't support, and do not write something silly. If you honestly believe there "
-             "is only one reasonable reading, write NO OTHER READING instead.",
+    "cautious": "Read it as cautiously as you can: the least the words could reasonably mean, and nothing that can't be "
+                "undone. Add nothing that wasn't said. Treat examples as the only cases mentioned.",
+    "bold": "Read it as boldly as you can: the most the words could reasonably mean, finishing the job the way the person "
+            "would want it finished. Treat examples as examples of a general rule. Don't invent things the words can't "
+            "support.",
 }
 
 SHARED = """You are one of several readers of a request a person sent to a coding agent. People rarely say everything
@@ -58,9 +52,9 @@ Turn your reading into code. For each function below, write expected(...) with e
 the right output for those inputs under your reading, or raises ValueError if your reading says the input should be
 refused. Standard library only. Do not import the project: it is not available to you.
 
-Also define EXTRA, a dict of input name -> list of more values worth trying, if the inputs listed miss something that
-matters under your reading: a boundary, an empty value, a negative number, another option. Plain numbers, strings,
-booleans or None only. Use EXTRA = {{}} if nothing is missing.
+Also define EXTRA, a dict of input name -> list of more values worth trying, if the inputs listed miss something real that
+matters under your reading: a boundary, another option. Only inputs that can really happen, so no negative ages or days.
+Plain numbers, strings, booleans or None only. Use EXTRA = {{}} if nothing is missing.
 
 {shapes}
 
@@ -104,7 +98,7 @@ someone non-technical could answer. Reply with JSON only, no other text:
 ROW_TASK = """The harness found these differences. For each one, decide whether two or more options are things a
 reasonable person could really mean, and whether the answer changes what gets built. If so, keep the question, even if
 another option is silly: leave a silly option out of "options" and rewrite the rest in plain words, keeping their letters.
-Set worth_asking to false, and say why, only when just one option is reasonable.
+Set worth_asking to false, and say why, only when just one option is reasonable, or when the input can't really happen.
 
 {questions}"""
 
@@ -211,9 +205,8 @@ def describe_shapes(statements, show_reading):
 def reader_prompt(lens, request, settled, statements, claim):
     head = SHARED.format(request=request, settled=settled_block(settled), lens=LENSES[lens])
     if statements:
-        return head + CODE.format(shapes=describe_shapes(statements, lens == "rival"))
-    told = f"\nHow the agent read it: {claim}" if lens == "rival" and claim else ""
-    return head + WORDS.format(claim=told)
+        return head + CODE.format(shapes=describe_shapes(statements, False))
+    return head + WORDS.format(claim="")
 
 
 def settled_block(settled):

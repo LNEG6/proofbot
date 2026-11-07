@@ -1,0 +1,207 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Proofbot film</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--blue:#3aa8ff;--violet:#a55bff;--pink:#ff5fa8;--amber:#ffb340;--green:#4ee08c;--dim:#5b5b5f;--fg:#f4f4f2;--line:#26262b;--card:#0b0b0e}
+*{box-sizing:border-box}
+html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:#000;color:var(--fg);font-family:'Inter Tight','Segoe UI',sans-serif;letter-spacing:-.022em;-webkit-font-smoothing:antialiased}
+.s{position:absolute;inset:0;display:none}
+.a{position:absolute}
+.mono{font-family:'JetBrains Mono',Consolas,monospace;letter-spacing:0}
+.cap{position:absolute;left:110px;top:868px;font-size:76px;font-weight:500;line-height:1.08;opacity:0}
+.card{position:absolute;background:var(--card);border:1.5px solid var(--line);border-radius:30px;overflow:hidden}
+.glow{position:absolute;left:0;right:0;top:-1px;height:2px;background:linear-gradient(90deg,transparent,var(--blue) 35%,var(--violet) 70%,transparent);box-shadow:0 0 34px 6px rgba(70,120,255,.5)}
+.msg{display:flex;gap:26px;align-items:flex-start;padding:30px 44px}
+.av{flex:none;width:76px;height:76px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:36px;font-weight:600;background:#1b1b20;color:#d8d8dc}
+.who{font-size:30px;font-weight:600;margin-bottom:8px}
+.who span{font-weight:400;color:var(--dim);font-size:24px;margin-left:12px}
+.txt{font-size:42px;line-height:1.22;color:#e9e9e7}
+.tag{color:var(--blue)}
+.pill{display:inline-block;padding:12px 26px;border-radius:999px;border:1.5px solid #34343a;font-family:'JetBrains Mono',monospace;font-size:28px;color:#c9c9cd;letter-spacing:0}
+.opt{border:1.5px solid #2c2c32;border-radius:18px;padding:22px 30px;font-size:36px;margin-top:16px;color:#d9d9d6}
+.small{position:absolute;left:110px;bottom:34px;font-family:'JetBrains Mono',monospace;font-size:19px;color:#57575c;letter-spacing:0;opacity:0}
+canvas{position:absolute;left:0;top:0}
+.o{left:1214px;font-size:29px;color:#c4c4c8;opacity:0;white-space:nowrap}
+.o i{position:absolute;left:-6px;right:-6px;top:52%;height:3px;background:#ff5f6a;transform-origin:left;transform:scaleX(0);box-shadow:0 0 12px rgba(255,95,106,.8)}
+</style></head><body>
+
+<section class="s" id="hook">
+  <div class="a" id="hq" style="left:760px;top:330px;font-size:44px;color:#cfcfcc;opacity:0">“I cleaned up the inactive users.</div>
+  <div class="a" id="hb" style="left:0;top:380px;width:1920px;text-align:center;font-size:300px;font-weight:500;letter-spacing:-.045em;line-height:1">Done.”</div>
+  <div class="a" id="h1" style="left:150px;top:300px;font-size:88px;font-weight:500;opacity:0">Cleaned up how?</div>
+  <div class="a" id="h2" style="left:150px;top:432px;font-size:88px;font-weight:500;opacity:0">Deleted, or disabled?</div>
+  <div class="a" id="h3" style="left:150px;top:564px;font-size:88px;font-weight:500;opacity:0">Who decided that?</div>
+  <div class="a mono" id="hm" style="left:1230px;top:640px;font-size:36px;color:#8d8d91;opacity:0;line-height:1.7">decided_by = ??<br>checked &nbsp;&nbsp;&nbsp;= ??</div>
+</section>
+
+<section class="s" id="logo">
+  <div class="a" id="lgo" style="left:0;top:398px;width:1920px;display:flex;justify-content:center;align-items:center;gap:34px">
+    <svg id="mark" width="118" height="118" viewBox="0 0 100 100" fill="none"><path d="M6 14 C42 14 42 50 66 50" stroke="#fff" stroke-width="9" stroke-linecap="round"/><path d="M6 86 C42 86 42 50 66 50" stroke="#fff" stroke-width="9" stroke-linecap="round"/><path d="M66 50 H94" stroke="#fff" stroke-width="9" stroke-linecap="round"/></svg>
+    <div style="font-size:150px;font-weight:500;letter-spacing:-.04em">Proofbot</div>
+  </div>
+  <div class="a mono" id="ltype" style="left:0;top:590px;width:1920px;text-align:center;font-size:36px;color:#9b9b9f"></div>
+</section>
+
+<section class="s" id="chat">
+  <div class="card" id="cc" style="left:300px;top:230px;width:1320px;height:430px"><div class="glow"></div>
+    <div class="mono" style="padding:30px 44px 18px;font-size:25px;color:#77777c;border-bottom:1.5px solid var(--line)"># ops &nbsp;·&nbsp; 3 people, 2 agents &nbsp;·&nbsp; a Switch room</div>
+    <div class="msg" id="c1" style="opacity:0"><div class="av">S</div><div><div class="who">sam <span>Monday</span></div><div class="txt"><span class="tag">@proof-doer</span> Clean up inactive users.</div></div></div>
+    <div class="msg" id="c2" style="opacity:0"><div class="av" style="background:#14233a;color:var(--blue)">d</div><div><div class="who">proof-doer</div><div class="txt">On it. Checking what you meant first.</div></div></div>
+  </div>
+  <div class="cap" id="cc1">Sounds simple.</div>
+  <div class="cap" id="cc2">One wrong guess deletes customers.</div>
+</section>
+
+<section class="s" id="fan">
+  <canvas id="fc" width="1920" height="1080"></canvas>
+  <div class="a" id="fs" style="left:70px;top:408px;width:236px;opacity:0"><div style="font-size:28px;color:#8d8d91">Sam said</div><div style="font-size:38px;font-weight:500;line-height:1.1">“Clean up inactive users.”</div></div>
+  <div class="a" id="fa" style="left:1214px;top:86px;opacity:0"><div style="font-size:40px;font-weight:600;color:var(--blue)">Cautious agent</div><div style="font-size:32px;color:#c8c8cc">Turn it off. Can be undone.</div></div>
+  <div class="a" id="fb" style="left:1214px;top:842px;opacity:0"><div style="font-size:40px;font-weight:600;color:var(--pink)">Bold agent</div><div style="font-size:32px;color:#c8c8cc">Delete it for good.</div></div>
+  <div class="a mono o" id="o1" style="top:262px">Archive after a year<i></i></div>
+  <div class="a mono o" id="o2" style="top:448px">Turn off after a year<i></i></div>
+  <div class="a mono o" id="o3" style="top:610px">Delete non-paying users<i></i></div>
+  <div class="a mono o" id="o4" style="top:742px">Delete everyone inactive<i></i></div>
+  <div class="card" id="fq" style="left:1214px;top:206px;width:666px;height:512px;opacity:0;background:rgba(10,10,13,.98)"><div class="glow"></div>
+    <div style="padding:30px 36px"><div style="font-size:28px;color:#8d8d91">They disagree, so it asks <span style="color:#fff">kim</span></div>
+    <div style="font-size:37px;font-weight:500;line-height:1.16;margin-top:12px">Someone who doesn't pay hasn't used the product for a year. What should happen to their account?</div>
+    <div id="fa2" class="opt" style="margin-top:20px;font-size:30px;padding:14px 22px">A: Turn it off, but keep it</div>
+    <div class="opt" style="margin-top:10px;font-size:30px;padding:14px 22px">B: Leave it alone for now</div>
+    <div class="opt" style="margin-top:10px;font-size:30px;padding:14px 22px">C: Delete it for good</div></div>
+  </div>
+  <div class="a" id="fm" style="left:1500px;top:396px;opacity:0;width:380px"><div style="font-size:30px;color:#8d8d91">kim decided</div><div style="font-size:50px;font-weight:600;line-height:1.08">Turn it off.<br>Keep the account.</div></div>
+  <div class="cap" id="fc1" style="top:950px;font-size:60px">Two agents. Opposite ends.</div>
+  <div class="cap" id="fc2" style="top:950px;font-size:60px;left:110px">Every wrong path dies here, before any work.</div>
+</section>
+
+<section class="s" id="dec">
+  <div class="card" id="dc" style="left:250px;top:120px;width:1420px;height:560px"><div class="glow"></div>
+    <div class="mono" style="padding:44px 70px 0;font-size:27px;color:#77777c">decision</div>
+    <div style="padding:10px 70px 0;font-size:124px;font-weight:500;letter-spacing:-.035em;line-height:1.02">Turn it off.<br>Keep the account.</div>
+    <div class="a" id="dk" style="left:70px;top:372px;opacity:0"><span class="pill" style="border-color:var(--blue);box-shadow:0 0 26px rgba(58,168,255,.55);color:#fff">kim</span> <span class="mono" style="font-size:28px;color:#8d8d91;margin-left:18px">job 1</span></div>
+    <div class="a" id="dd" style="left:70px;top:450px;opacity:0"><span class="pill" style="border-color:var(--green);color:var(--green);box-shadow:0 0 26px rgba(78,224,140,.4)">DONE AND PROVEN</span></div>
+  </div>
+  <div class="cap" id="dc1">Every decision, with its name.</div>
+  <div class="cap" id="dc2">It becomes a check. The code has to pass it.</div>
+</section>
+
+<section class="s" id="week">
+  <div class="a" id="w0" style="left:0;top:440px;width:1920px;text-align:center;font-size:150px;font-weight:500;opacity:0">A week later.</div>
+  <div class="card" id="wc" style="left:150px;top:56px;width:1620px;height:172px;opacity:0"><div class="glow"></div>
+    <div class="msg" style="padding:32px 44px"><div class="av">P</div><div><div class="who">priya</div><div class="txt" style="font-size:40px"><span class="tag">@proof-doer</span> Remove accounts nobody has used in a year. We need the space.</div></div></div>
+  </div>
+  <div class="card" id="wl" style="left:150px;top:262px;width:790px;height:490px;opacity:0;background:#08080a">
+    <div style="padding:40px 46px"><div style="font-size:31px;color:#77777c">Plain Claude Code, told to ask if unclear</div>
+    <div style="font-size:42px;font-weight:500;line-height:1.16;margin-top:20px;color:#c9c9cc">“Should accounts be deleted permanently, or just disabled?”</div>
+    <div class="mono" style="font-size:27px;color:#77777c;margin-top:14px">asks priya, who typed</div>
+    <div style="font-size:42px;font-weight:500;line-height:1.16;margin-top:26px;color:#c9c9cc">“Delete. We need the space.”</div>
+    <div style="font-size:35px;margin-top:30px;color:#ff7b72">Kim never hears about it.</div></div>
+  </div>
+  <div class="card" id="wr" style="left:980px;top:262px;width:790px;height:490px;opacity:0;border-color:var(--amber);box-shadow:0 0 54px rgba(255,179,64,.2)">
+    <div style="padding:40px 46px"><div class="mono" style="font-size:40px;color:var(--amber)">STOP <span style="font-size:27px;color:#8d8d91;margin-left:12px">no work has started</span></div>
+    <div style="font-size:44px;font-weight:500;line-height:1.16;margin-top:20px">This goes against what <span style="color:var(--blue)">kim</span> decided in job 1. Keep that, or change it?</div>
+    <div class="opt" id="wk" style="margin-top:26px">A: Keep what kim decided</div>
+    <div class="opt" style="margin-top:14px">B: Change it. The new request wins</div></div>
+  </div>
+  <div class="cap" id="wc1" style="top:838px">It doesn't ask whoever typed.</div>
+  <div class="cap" id="wc2" style="top:838px">It asks the person who decided.</div>
+</section>
+
+<section class="s" id="room">
+  <div class="a" id="r1" style="left:110px;top:300px;font-size:92px;font-weight:500;line-height:1.06;opacity:0">It all runs in<br>your team chat.</div>
+  <div class="a" id="r2" style="left:110px;top:540px;font-size:46px;line-height:1.3;color:#d0d0cd;opacity:0">Your team just chats.<br><span style="color:#77777c">The agent never marks its own homework.</span></div>
+  <div class="card" id="rc" style="left:1010px;top:210px;width:800px;height:640px;opacity:0"><div class="glow"></div>
+    <div class="mono" style="padding:32px 44px 20px;font-size:25px;color:#77777c;border-bottom:1.5px solid var(--line)">built on Switch</div>
+    <div class="msg" style="padding:22px 44px"><div class="av" style="background:#14233a;color:var(--blue)">d</div><div><div class="who">proof-doer</div><div class="txt" style="font-size:33px">Does the work</div></div></div>
+    <div class="msg" style="padding:22px 44px"><div class="av" style="background:#241538;color:var(--violet)">r</div><div><div class="who">proof-referee</div><div class="txt" style="font-size:33px">Asks, then says if it's really done</div></div></div>
+    <div class="msg" style="padding:22px 44px"><div class="av">+</div><div><div class="who">your team</div><div class="txt" style="font-size:33px">Decides</div></div></div>
+    <div class="mono" style="padding:24px 44px;font-size:26px;color:#8d8d91;border-top:1.5px solid var(--line);margin-top:14px;line-height:1.6">Slack · Teams · Discord · Telegram<br>Claude Code · Codex · OpenCode</div>
+  </div>
+</section>
+
+<section class="s" id="tag">
+  <div class="a" id="t1" style="left:0;top:476px;width:1920px;text-align:center;font-size:88px;font-weight:500;opacity:0">AI agents, without the guessing.</div>
+  <div class="a" id="t2" style="left:660px;top:600px;width:600px;height:3px;background:linear-gradient(90deg,transparent,var(--blue),var(--violet),var(--pink),transparent);box-shadow:0 0 30px 5px rgba(90,110,255,.55);opacity:0"></div>
+</section>
+
+<section class="s" id="end">
+  <div class="a" id="e1" style="left:0;top:340px;width:1920px;display:flex;justify-content:center;align-items:center;gap:30px;opacity:0">
+    <svg width="104" height="104" viewBox="0 0 100 100" fill="none"><path d="M6 14 C42 14 42 50 66 50" stroke="#fff" stroke-width="9" stroke-linecap="round"/><path d="M6 86 C42 86 42 50 66 50" stroke="#fff" stroke-width="9" stroke-linecap="round"/><path d="M66 50 H94" stroke="#fff" stroke-width="9" stroke-linecap="round"/></svg>
+    <div style="font-size:132px;font-weight:500;letter-spacing:-.04em">Proofbot</div>
+  </div>
+  <div class="a" id="e2" style="left:0;top:506px;width:1920px;text-align:center;font-size:44px;color:#d4d4d1;opacity:0">Every decision, with its name.</div>
+  <div class="a" id="e3" style="left:0;top:586px;width:1920px;text-align:center;opacity:0"><span class="pill" style="font-size:31px;padding:14px 30px">github.com/qunatumstuff/proofbot</span></div>
+  <div class="a mono" id="e4" style="left:0;top:684px;width:1920px;text-align:center;font-size:22px;color:#6b6b70;opacity:0">built on Switch &nbsp;·&nbsp; Flip the Switch Hackathon</div>
+  <div class="a mono" id="e5" style="left:0;top:1010px;width:1920px;text-align:center;font-size:18px;color:#4d4d52;opacity:0">Chat scenes and the path chart are illustrations. Questions are shortened from real runs of the harness with Claude Code. Priya's reply is illustrative.</div>
+</section>
+
+<script>
+const clamp=(x,a=0,b=1)=>Math.min(b,Math.max(a,x)), P=(t,a,b)=>clamp((t-a)/(b-a));
+const eo=x=>1-Math.pow(1-x,3), eio=x=>x<.5?4*x*x*x:1-Math.pow(-2*x+2,3)/2;
+const $=id=>document.getElementById(id);
+function rev(el,t,a,d=.5,out=null,{y=22,blur=12}={}){   // reveal at a, optional blur-out at out
+  const pi=P(t,a,a+d), e=eo(pi), po=out==null?0:P(t,out,out+.32);
+  el.style.opacity=e*(1-po);
+  const b=(1-e)*blur+po*blur;
+  el.style.filter=b>.05?`blur(${b}px)`:'none';
+  el.style.transform=`translateY(${(1-e)*y}px)`;
+}
+function dimmed(el,t,a,next){ rev(el,t,a); if(t>next){el.style.opacity=Math.max(.28,1-P(t,next,next+.35)*.72)} }
+
+/* --- the chart: fine random paths between two agents, then one line --- */
+let seed=11; const rnd=()=>{seed|=0;seed=seed+0x6D2B79F5|0;let t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};
+const gauss=()=>Math.sqrt(-2*Math.log(rnd()+1e-9))*Math.cos(6.283*rnd());
+const X0=330,XG=1180,X1=1480,CY=500,SP=350,STEPS=70,N=520,TARGET=CY-34;
+function buildPaths(){ const out=[];
+  for(let i=0;i<N;i++){ const u=(i/(N-1))*2-1+gauss()*.018; const w=[0]; for(let k=1;k<=STEPS;k++) w.push(w[k-1]+gauss()*4.6);
+    const end=w[STEPS], pts=[];
+    for(let k=0;k<=STEPS;k++){const t=k/STEPS,e=Math.pow(t,.72); pts.push([X0+(XG-X0)*t, CY+u*SP*e+(w[k]-end*t)*Math.sin(Math.PI*t)*(.8+Math.abs(u)*.3)]);}
+    out.push({u,pts}); }
+  const edge=s=>{const pts=[],w=[0];for(let k=1;k<=STEPS;k++)w.push(w[k-1]+gauss()*3);const end=w[STEPS];for(let k=0;k<=STEPS;k++){const t=k/STEPS;pts.push([X0+(XG-X0)*t,CY+s*SP*1.07*Math.pow(t,.72)+(w[k]-end*t)*Math.sin(Math.PI*t)])}return pts};
+  return {paths:out,top:edge(-1),bot:edge(1)};
+}
+const F=buildPaths();
+function mix(u){ // blue at the cautious edge, white in the middle, pink at the bold edge
+  const a=Math.abs(u), c=u<0?[58,168,255]:[255,95,168]; const w=[235,235,245], m=Math.pow(a,.8);
+  return c.map((v,i)=>Math.round(w[i]+(v-w[i])*m)).join(',');
+}
+function line(ctx,pts,n){ctx.beginPath();for(let k=0;k<=n;k++){const q=pts[k];k?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1])}ctx.stroke()}
+function drawFan(t,still){ const c=$('fc'),x=c.getContext('2d'); x.clearRect(0,0,1920,1080); x.globalCompositeOperation='lighter'; x.lineCap='round'; x.lineJoin='round';
+  const grow=eio(P(t,.3,3)), n=Math.round(STEPS*grow), kill=eio(P(t,8.4,10)), tail=eio(P(t,8.6,10.6));
+  for(const p of F.paths){ const near=Math.abs((p.pts[STEPS][1]-TARGET))/ (SP*1.05), keep=clamp(1-near*5.5); const alpha=(.13+.05*Math.abs(p.u))*(1-kill*(1-keep*.65));
+    x.strokeStyle=`rgba(${mix(p.u)},${alpha})`; x.lineWidth=1; line(x,p.pts,n);
+    if(tail>0&&keep>0){ const q=p.pts[STEPS]; x.beginPath(); x.moveTo(q[0],q[1]); const X=XG+(X1-XG)*tail; x.bezierCurveTo(XG+90,q[1],XG+120,TARGET,X,TARGET); x.strokeStyle=`rgba(235,235,250,${.1*keep})`; x.stroke(); } }
+  x.lineWidth=4; const eK=1-kill*.82;
+  x.strokeStyle=`rgba(58,168,255,${eK})`; x.shadowColor='rgba(58,168,255,.9)'; x.shadowBlur=22; if(n>0) line(x,F.top,n);
+  x.strokeStyle=`rgba(255,95,168,${eK})`; x.shadowColor='rgba(255,95,168,.9)'; if(n>0) line(x,F.bot,n);
+  x.shadowBlur=0;
+  const gate=P(t,3.6,4.2)*(1-P(t,10,10.4)); if(gate>0){x.setLineDash([6,10]);x.strokeStyle=`rgba(255,255,255,${.42*gate})`;x.lineWidth=2;x.beginPath();x.moveTo(XG,90);x.lineTo(XG,900);x.stroke();x.setLineDash([])}
+  if(tail>0){ x.strokeStyle='rgba(255,255,255,1)'; x.lineWidth=5; x.shadowColor='rgba(255,255,255,.9)'; x.shadowBlur=24; x.beginPath(); const mid=F.paths[Math.floor(N*.45)].pts; x.moveTo(mid[STEPS][0],TARGET); x.lineTo(XG+(X1-XG)*tail,TARGET); x.stroke(); x.shadowBlur=0; x.beginPath(); x.fillStyle='#fff'; x.arc(XG+(X1-XG)*tail,TARGET,9,0,7); x.fill(); }
+  x.globalCompositeOperation='source-over'; x.fillStyle='#fff'; x.shadowColor='#fff'; x.shadowBlur=20; x.beginPath(); x.arc(X0,CY,10,0,7); x.fill(); x.shadowBlur=0;
+}
+
+/* --- timeline --- */
+const typeText=(el,s,t,a,cps=34)=>{const n=Math.floor(clamp((t-a)*cps,0,s.length));el.textContent=s.slice(0,n)+(t>a&&t<a+s.length/cps+.9&&Math.floor(t*3)%2===0?'▏':'')};
+const SC=[
+ {id:'hook',a:0,b:6.9,f(t){const mv=eio(P(t,2.05,2.75)),hb=$('hb');rev($('hq'),t,.25,.5,null,{});$('hq').style.opacity=eo(P(t,.25,.75))*(1-P(t,2,2.3));
+   hb.style.opacity=eo(P(t,.05,.5));hb.style.transform=`translate(${mv*430}px,${-mv*92}px) scale(${1-mv*.3})`;hb.style.filter=`blur(${(1-eo(P(t,.05,.5)))*16}px)`;
+   dimmed($('h1'),t,2.5,3.7);dimmed($('h2'),t,3.7,4.9);rev($('h3'),t,4.9);rev($('hm'),t,3.2)}},
+ {id:'logo',a:6.9,b:10.3,f(t){const z=eio(P(t,0,.85));$('lgo').style.transform=`scale(${7-6*z})`;$('lgo').style.filter=`blur(${(1-z)*26}px)`;$('lgo').style.opacity=clamp(z*1.6);typeText($('ltype'),'asks the right person. remembers the answer.',t,1.05,30)}},
+ {id:'chat',a:10.3,b:15.6,f(t){$('cc').style.transform=`scale(${1+t*.012})`;rev($('c1'),t,.3);rev($('c2'),t,1.7);rev($('cc1'),t,.6,.5,2.45);rev($('cc2'),t,2.8)}},
+ {id:'fan',a:15.6,b:28.2,f(t){drawFan(t);rev($('fs'),t,.2);rev($('fa'),t,1.4,.5,9.4);rev($('fb'),t,1.7,.5,9.4);rev($('fc1'),t,1.6,.5,3.7);rev($('fq'),t,3.9,.5,8.1);
+   [['o1',2.1,1],['o2',2.35,0],['o3',2.6,1],['o4',2.85,1]].forEach(([id,at,wrong],i)=>{const el=$(id);rev(el,t,at);
+     const cover=P(t,3.8,4.2)*(1-P(t,7.9,8.3)); let o=eo(P(t,at,at+.5))*(1-cover);
+     if(wrong){const hit=eo(P(t,8.5+i*.16,8.85+i*.16));el.firstElementChild.style.transform=`scaleX(${hit})`;o*=1-P(t,9.9,10.5)*.8}
+     else{o*=1-P(t,8.3,8.6);}
+     el.style.opacity=o});$('fa2').style.borderColor=t>6.7?'#3aa8ff':'#2c2c32';$('fa2').style.boxShadow=t>6.7?'0 0 26px rgba(58,168,255,.5)':'none';rev($('fm'),t,9.4);rev($('fc2'),t,8.5)}},
+ {id:'dec',a:28.2,b:34.2,f(t){$('dc').style.transform=`scale(${1+t*.009})`;rev($('dk'),t,.5);rev($('dc1'),t,.6,.5,3);rev($('dd'),t,3);rev($('dc2'),t,3.2)}},
+ {id:'week',a:34.2,b:46,f(t){rev($('w0'),t,.1,.5,1.5);rev($('wc'),t,1.9);rev($('wl'),t,3);rev($('wc1'),t,4.2,.5,7);rev($('wr'),t,6.2);rev($('wc2'),t,7.3);$('wk').style.borderColor=t>9.4?'#ffb340':'#2c2c32'}},
+ {id:'room',a:46,b:52,f(t){rev($('r1'),t,.2);rev($('r2'),t,1.5);rev($('rc'),t,.6)}},
+ {id:'tag',a:52,b:55.3,f(t){rev($('t1'),t,.2,.6);$('t2').style.opacity=eo(P(t,.6,1.1));$('t2').style.transform=`scaleX(${eo(P(t,.6,1.3))})`}},
+ {id:'end',a:55.3,b:60,f(t){rev($('e1'),t,.1,.6);rev($('e2'),t,.5);rev($('e3'),t,.85);rev($('e4'),t,1.2);rev($('e5'),t,1.5)}},
+];
+window.DURATION=60;
+window.seek=function(T){ let active=null; for(const s of SC){const on=T>=s.a&&T<s.b; const el=$(s.id); el.style.display=on?'block':'none'; if(on) active=s;}
+  if(!active) return; const lt=T-active.a, el=$(active.id); const outP=P(T,active.b-.3,active.b); el.style.opacity=1-outP; el.style.filter=outP>0?`blur(${outP*18}px)`:'none'; active.f(lt); };
+window.chartStill=function(){ };
+seek(0);
+</script></body></html>
