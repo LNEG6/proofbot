@@ -25,9 +25,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import readings
+import switchlink
 
 CHECK_DIR = "proof_checks"
 MESSAGE_LIMIT = 4000  # WhatsApp allows 4096 characters per message
@@ -368,8 +370,9 @@ Write acceptance checks in the folder {CHECK_DIR}/ of this workspace:
 - Test real behaviour: run the program, call the function, read the output. Only check that a file
   contains something when the task is about that file's text.
 - Prove each rule by exhaustion where the inputs can be listed: define DOMAIN, a dict of input name -> range or
-  list (every option, like each role, status, customer type or flag; for numbers cover negatives, zero and edge
-  values; at most 10 million combinations in all), plus run(**inputs), which
+  list (every option, like each role, status, customer type or flag; for numbers use realistic values, zero and the
+  boundaries that matter, never impossible ones like a negative age or a huge made-up number; at most 10 million
+  combinations in all), plus run(**inputs), which
   calls the code and returns its output, and expected(**inputs), which returns the right output. The harness tries
   every combination and maps every input to its output. expected must work out the answer by itself: it runs without
   the project, so it can't call the code being checked. It returns one answer, never a set of acceptable answers: if the
@@ -609,8 +612,15 @@ def load_decisions(settings):
 
 
 def settled_lines(settings, state):
-    """Everything the person has settled, in this job and in earlier ones, so nobody gets asked twice."""
-    return [entry["said"] for entry in load_decisions(settings) + (state.get("answers") or [])]
+    """Everything people have settled here, so nobody gets asked twice."""
+    return [entry["said"] for entry in load_decisions(settings)]
+
+
+def remember(settings, number, entry):
+    """A person's answer stands from the moment they give it, whatever happens to the job."""
+    keep = {key: entry[key] for key in ("said", "who", "check", "inputs", "output") if key in entry}
+    decisions_path(settings).parent.mkdir(parents=True, exist_ok=True)
+    decisions_path(settings).write_text(json.dumps(load_decisions(settings) + [{"job": number, **keep}], indent=2), encoding="utf-8")
 
 
 def read_meaning(settings, job, state, sealed):
@@ -658,7 +668,7 @@ def find_contradictions(settings, state, sealed):
     answered = {readings.key(entry["inputs"]) for entry in state.get("answers") or [] if entry.get("inputs")}
     for decision in load_decisions(settings):
         inputs = decision.get("inputs")
-        if "output" not in decision or readings.key(inputs) in answered:
+        if "output" not in decision or readings.key(inputs) in answered or decision["job"] == state["job"] or len(found) >= 2:
             continue
         for name, source in sealed:
             text = source.decode("utf-8", "replace").lstrip("\ufeff")
@@ -671,11 +681,52 @@ def find_contradictions(settings, state, sealed):
                 continue
             who = decision.get("who") or "someone"
             found.append({
-                "id": f"d{len(found) + 1}", "check": name, "inputs": inputs, "worth": True, "owner": decision.get("who", ""),
+                "id": f"d{len(found) + 1}", "job": decision["job"], "check": name, "inputs": inputs, "worth": True, "owner": decision.get("who", ""),
                 "ask": f"This goes against what {who} decided in job {decision['job']}: \"{decision['said']}\" Keep that, or change it?",
                 "options": [{"label": "A", "says": f"Keep what {who} decided", "output": decision["output"], "readers": []},
                             {"label": "B", "says": "Change it. The new request wins", "output": now, "readers": [],
                              "retires": decision["job"]}]})
+            break
+    return found
+
+
+def proven_clashes(settings, job, state, sealed, found):
+    """Run every proven check against the new checks, before the work. This catches a rule however it was settled,
+    in someone's own words or never asked at all. A difference here would fail at the end anyway, so it's never a
+    false alarm: it just saves the work."""
+    isolated = job / "recheck"
+    isolated.mkdir(exist_ok=True)
+    answered = {readings.key(entry["inputs"]) for entry in state.get("answers") or [] if entry.get("inputs")}
+    jobs = {question["job"] for question in found}
+    for entry in load_library(settings):
+        if len(found) >= 2 or entry["job"] == state["job"] or entry["job"] in jobs:
+            continue
+        old = (library_dir(settings) / entry["file"]).read_bytes().decode("utf-8", "replace").lstrip("\ufeff")
+        form = readings.shape(old)
+        info = probe_check(settings, old, entry["name"], None, isolated=isolated) if form else None
+        if not info or not info.get("domain"):
+            continue
+        rows, _ = readings.make_rows(info["domain"], entry["name"])
+        before = probe_check(settings, old, entry["name"], rows, isolated=isolated)
+        for name, source in sealed:
+            text = source.decode("utf-8", "replace").lstrip("\ufeff")
+            new = readings.shape(text)
+            if not before or new is None or new["params"] != form["params"]:
+                continue
+            after = probe_check(settings, text, name, rows, isolated=isolated)
+            if not after or len(after["outputs"]) != len(rows):
+                continue
+            clash = next((i for i, (a, b) in enumerate(zip(before["outputs"], after["outputs"]))
+                          if readings.key(a) != readings.key(b) and b != {"raises": True} and readings.key(rows[i]) not in answered), None)
+            if clash is None:
+                continue
+            who = entry.get("decided_by") or "an earlier job"
+            found.append({"id": f"d{len(found) + 1}", "job": entry["job"], "check": name, "inputs": rows[clash], "worth": True,
+                          "owner": (entry.get("decided_by") or "").split(",")[0],
+                          "ask": f"This goes against what {who} settled in job {entry['job']}: \"{entry['says'][:140]}\" Keep that, or change it?",
+                          "options": [{"label": "A", "says": f"Keep what job {entry['job']} proved", "output": before["outputs"][clash], "readers": []},
+                                      {"label": "B", "says": "Change it. The new request wins", "output": after["outputs"][clash], "readers": [],
+                                       "drops": entry["file"]}]})
             break
     return found
 
@@ -690,8 +741,10 @@ def retire(settings, job_number, check, inputs):
     (library_dir(settings) / "library.json").write_text(json.dumps(kept, indent=2), encoding="utf-8")
 
 
-def answer_question(settings, number, question_id, reply, who=""):
-    """Record what the person said. A letter picks an option; anything else is taken as their own words."""
+def answer_question(settings, number, question_id, reply, who="", confirmed=None):
+    """Record what the person said. A letter picks an option; anything else is taken as their own words.
+
+    `confirmed` is the message Switch reports for this answer, so the name comes from the room and not from an AI."""
     job = job_dir(settings, number)
     state = load_state(job)
     question = next((item for item in open_questions(state) if item["id"] == question_id), None)
@@ -700,6 +753,8 @@ def answer_question(settings, number, question_id, reply, who=""):
     reply = reply.strip()
     pick = next((option for option in question["options"] if option["label"] == reply.upper()), None)
     entry = {"check": question["check"], "inputs": question["inputs"], "ask": question["ask"], "reply": reply, "who": who}
+    if confirmed:
+        entry.update(who=confirmed["sender_name"], confirmed=confirmed.get("id") or True)
     entry["said"] = f"{question['ask']} {pick['says'] if pick else reply}"
     if pick and "output" in pick:
         entry["output"] = pick["output"]
@@ -708,9 +763,13 @@ def answer_question(settings, number, question_id, reply, who=""):
                        and item.get("inputs") == question["inputs"])
         retire(settings, pick["retires"], decided.get("check"), question["inputs"])
         entry["said"] = f"Changed what {decided.get('who') or 'someone'} decided in job {pick['retires']}: {question['inputs']} now gives {pick['output']!r}."
+    if pick and "drops" in pick:
+        kept = [item for item in load_library(settings) if item["file"] != pick["drops"]]
+        (library_dir(settings) / "library.json").write_text(json.dumps(kept, indent=2), encoding="utf-8")
     state.setdefault("answers", []).append(entry)
     state["readings"]["questions"] = [item for item in open_questions(state) if item["id"] != question_id]
     save_state(job, state)
+    remember(settings, number, entry)
     return entry
 
 
@@ -753,7 +812,8 @@ def meaning_lines(state):
         lines.append("(these inputs can't be listed, so an AI compared the readings in words)")
         lines += [f"- {lens} read it as: {reader['assumes']}" for lens, reader in sorted(found.get("readers", {}).items())]
     for entry in state.get("answers") or []:
-        lines.append(f"YOU DECIDED{' (' + entry['who'] + ')' if entry.get('who') else ''}: {entry['said']}")
+        by = ", ".join(part for part in (entry.get("who"), "confirmed by Switch" if entry.get("confirmed") else "") if part)
+        lines.append(f"YOU DECIDED{' (' + by + ')' if by else ''}: {entry['said']}")
     for item in state.get("answer_results") or []:
         if not item["ok"]:
             lines.append(f"FAIL does not do what you decided: {item['said']} It gave {item['got']!r}.")
@@ -839,8 +899,8 @@ def add_to_library(settings, state, job):
             continue
         file = f"job{state['job']}_{check['name']}"
         (folder / file).write_bytes((job / "sealed" / check["name"]).read_bytes())
-        decided = sorted({entry["who"] for entry in state.get("answers") or []
-                          if entry.get("who") and entry.get("check") == check["name"]})
+        decided = sorted({entry["who"] for entry in state.get("answers") or [] if entry.get("who")}) or \
+            ([state["who"]] if state.get("who") else [])
         entries.append({"file": file, "name": check["name"], "says": check["says"], "job": state["job"],
                         "sha256": check["sha256"], "decided_by": ", ".join(decided)})
         added.append(check["name"])
@@ -904,6 +964,8 @@ def relies_on(state):
             out.append("readings were compared on a random sample of the inputs, not all of them")
         if found.get("dropped"):
             out.append("a difference was not put to you; it is listed under NOT ASKED")
+    if state.get("answers") and not all(entry.get("confirmed") for entry in state["answers"]):
+        out.append("nothing confirmed who gave the answers to these questions")
     inside = [check["name"] for check in checks if not check.get("recheck")]
     if inside:
         out.append(f"{', '.join(inside)} ran in one process with the code, so it assumes the code did not tamper with it")
@@ -949,7 +1011,8 @@ def seal(settings, number):
     state.update(sealed_tree=tree, checks=checks, strays=[item["path"] for item in strays],
                  review=review_checks(settings, job, state["request"], sealed))
     state["readings"] = read_meaning(settings, job, state, sealed)
-    against = find_contradictions(settings, state, sealed)
+    state["asked_at"] = int(time.time() * 1000) - 5000  # only answers given after this count
+    against = proven_clashes(settings, job, state, sealed, find_contradictions(settings, state, sealed))
     if against:
         state["readings"] = state["readings"] or {"ok": True, "mode": "compared", "statements": [], "conflicts": [],
                                                   "failed": [], "dropped": [], "questions": []}
@@ -990,13 +1053,8 @@ def finish(settings, number, claim=""):
     if "library_before" in state:
         state["library_added"] = add_to_library(settings, state, job) if state["verdict"].startswith("DONE") else []
         state["assumptions"] = relies_on(state)
-        settled = [{key: entry[key] for key in ("said", "who", "check", "inputs", "output") if key in entry}
-                   for entry in state.get("answers") or []]
-        settled += [{"said": f"Correction: {state['request']}", "who": state.get("who", "")}] if state.get("correction") else []
-        if state["verdict"].startswith("DONE") and settled:  # remembered, so nobody has to say it twice
-            decisions = load_decisions(settings) + [{"job": number, **entry} for entry in settled]
-            decisions_path(settings).parent.mkdir(parents=True, exist_ok=True)
-            decisions_path(settings).write_text(json.dumps(decisions, indent=2), encoding="utf-8")
+        if state["verdict"].startswith("DONE") and state.get("correction"):  # a correction counts once it's proven
+            remember(settings, number, {"said": f"Correction: {state['request']}", "who": state.get("who", "")})
     ledger = settings.home / "ledger.jsonl"
     entries = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()] if ledger.exists() else []
     state["previous"] = entries[-1]["receipt"] if entries else None
@@ -1036,7 +1094,7 @@ def run_job(settings, request, progress=lambda text: None, ask=None, correction=
         state = load_state(job)
         found = state.get("readings") or {}
         if ask and attempt and found.get("conflicts") and found.get("dropped"):  # fixing didn't settle it: ask the person
-            found["questions"], found["dropped"], found["conflicts"] = found["questions"] + found["dropped"], [], []
+            readings.promote(found, len(state.get("answers") or []))
             save_state(job, state)
         questions = open_questions(state) if ask else []
         if questions:
@@ -1052,7 +1110,8 @@ def run_job(settings, request, progress=lambda text: None, ask=None, correction=
         checks = seal(settings, number)
     red = sum(not check["before"]["ok"] for check in checks)
     progress(f"Job {number}: {len(checks)} check(s) sealed, {red} failing as they should. Now doing the work.")
-    second = run_agent(settings, job, "work", work_prompt(request, [check["name"] for check in checks], settled))
+    second = run_agent(settings, job, "work", work_prompt(request, [check["name"] for check in checks],
+                                                          [entry["said"] for entry in load_decisions(settings)]))
     state = load_state(job)
     state["agent_exit"] = {"checks": first["code"], "work": second["code"]}
     save_state(job, state)
@@ -1267,6 +1326,31 @@ def verify(settings, number, given, text=None, recheck=False):
     return trusted, "\n".join(lines + [f"{status:<3} {message}" for status, message in findings])
 
 
+class Tee:
+    """Prints as usual and keeps a copy, so the harness can post exactly what it printed."""
+
+    def __init__(self, stream):
+        self.stream, self.copy = stream, []
+
+    def write(self, text):
+        self.copy.append(text)
+        return self.stream.write(text)
+
+    def flush(self):
+        self.stream.flush()
+
+
+def connect(name):
+    """The Switch room, or None with a warning. A room that can't be reached must never stop a job."""
+    if not name:
+        return None
+    try:
+        return switchlink.Room(name)
+    except switchlink.SwitchError as error:
+        print(f"WARN not connected to the Switch room: {error}. Post this yourself.")
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Prove an agent's work. Settings come from .env next to this file.")
     parser.add_argument("--env", default=str(Path(__file__).with_name(".env")))
@@ -1298,10 +1382,14 @@ def main():
     answer_parser.add_argument("--who", default="", help="who answered")
     parser.add_argument("--workspace", help="folder the agent works in (overrides WORKSPACE)")
     parser.add_argument("--home", help="where the harness keeps evidence (overrides PROOF_HOME)")
+    parser.add_argument("--room", help="the Switch room to post to and read from, when running inside a Switch session")
+    parser.add_argument("--agent", help="the AI that reads requests: claude or codex (overrides AGENT)")
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     env = load_env(args.env)
     env.update({key: value for key, value in (("WORKSPACE", args.workspace), ("PROOF_HOME", args.home)) if value})
+    if args.agent in ("claude", "codex"):
+        env["AGENT"] = args.agent
     try:
         settings = Settings.from_env(env)
     except KeyError:
@@ -1315,6 +1403,10 @@ def main():
             print(("OK: " if ok else "PROBLEM: the sandbox cannot run Python, so checks cannot run safely. ") + detail +
                   ("" if ok else "\nSee 'Let the sandbox run Python' in README.md, or set CHECK_RUNNER=direct."))
             sys.exit(0 if ok else 1)
+    room = connect(args.room) if args.action in ("seal", "answer", "finish") else None
+    screen = sys.stdout
+    if room and args.action != "answer":
+        sys.stdout = Tee(screen)
     try:
         if args.action == "run":
             ask = (lambda text: input(text + "\nYour answer (a letter, or say what you meant): ")) if sys.stdin.isatty() else None
@@ -1352,8 +1444,18 @@ def main():
             state = load_state(job_dir(settings, args.job))
             print("\n".join(readings.question_text(item) for item in open_questions(state)) or "No open questions.")
         elif args.action == "answer":
-            entry = answer_question(settings, args.job, args.question, args.reply, args.who)
-            print(f"Recorded: {entry['said']}")
+            message = None
+            if room:
+                state = load_state(job_dir(settings, args.job))
+                try:
+                    message = room.confirm(args.reply, state.get("asked_at", 0))
+                except switchlink.SwitchError as error:
+                    print(f"WARN couldn't read the Switch room: {error}. Recording the answer without confirming it.")
+                else:
+                    if message is None:
+                        parser.exit(1, f"Refused: no person in the room has said \"{args.reply}\". Only a person's answer counts.\n")
+            entry = answer_question(settings, args.job, args.question, args.reply, args.who, message)
+            print(f"Recorded{' from ' + entry['who'] if message else ''}: {entry['said']}")
             left = open_questions(load_state(job_dir(settings, args.job)))
             print("\n".join(readings.question_text(item) for item in left) if left else
                   "All answered. Update the checks to match, then seal again.")
@@ -1372,6 +1474,14 @@ def main():
             sys.exit(0 if trusted else 1)
     except (RuntimeError, OSError, KeyError, ValueError) as error:
         parser.exit(1, f"{error}\n")
+    if isinstance(sys.stdout, Tee):
+        text = "".join(sys.stdout.copy)
+        sys.stdout = screen
+        try:
+            room.post(text)
+            print("Posted to the room by the harness.")
+        except switchlink.SwitchError as error:
+            print(f"WARN couldn't post to the Switch room: {error}. Post this yourself.")
 
 
 if __name__ == "__main__":

@@ -21,13 +21,19 @@ html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:#000;co
 .opt{border:1.5px solid #2c2c32;border-radius:18px;padding:22px 30px;font-size:36px;margin-top:16px;color:#d9d9d6}
 .small{position:absolute;left:110px;bottom:34px;font-family:'JetBrains Mono',monospace;font-size:19px;color:#57575c;letter-spacing:0;opacity:0}
 canvas{position:absolute;left:0;top:0}
+#chip{position:absolute;left:0;top:14px;width:1920px;text-align:center;z-index:9;opacity:0}
+#chip span{display:inline-block;padding:9px 22px;border-radius:999px;border:1.5px solid var(--blue);background:rgba(6,10,18,.92);box-shadow:0 0 22px rgba(58,168,255,.45);font-family:'JetBrains Mono',monospace;font-size:24px;letter-spacing:0;color:#c9d6e6}
+#chip b{color:#fff;font-weight:500}
+.row{display:flex;align-items:baseline;padding:21px 0;border-bottom:1.5px solid var(--line);opacity:0}
+.row .l{flex:none;width:520px;font-family:'JetBrains Mono',monospace;font-size:31px;letter-spacing:0;color:var(--blue)}
+.row .r{font-size:46px;font-weight:500;color:#ecece9}
 .o{left:1214px;font-size:29px;color:#c4c4c8;opacity:0;white-space:nowrap}
 .o i{position:absolute;left:-6px;right:-6px;top:52%;height:3px;background:#ff5f6a;transform-origin:left;transform:scaleX(0);box-shadow:0 0 12px rgba(255,95,106,.8)}
 </style></head><body>
 
 <section class="s" id="hook">
-  <div class="a" id="hq" style="left:760px;top:330px;font-size:44px;color:#cfcfcc;opacity:0">“I cleaned up the inactive users.</div>
-  <div class="a" id="hb" style="left:0;top:380px;width:1920px;text-align:center;font-size:300px;font-weight:500;letter-spacing:-.045em;line-height:1">Done.”</div>
+  <div class="a" id="hq" style="left:0;top:326px;width:1920px;text-align:center;font-size:44px;color:#cfcfcc;opacity:0">Your agent says</div>
+  <div class="a" id="hb" style="left:0;top:380px;width:1920px;text-align:center;font-size:300px;font-weight:500;letter-spacing:-.045em;line-height:1">“Done.”</div>
   <div class="a" id="h1" style="left:150px;top:300px;font-size:88px;font-weight:500;opacity:0">Cleaned up how?</div>
   <div class="a" id="h2" style="left:150px;top:432px;font-size:88px;font-weight:500;opacity:0">Deleted, or disabled?</div>
   <div class="a" id="h3" style="left:150px;top:564px;font-size:88px;font-weight:500;opacity:0">Who decided that?</div>
@@ -133,6 +139,17 @@ canvas{position:absolute;left:0;top:0}
   </div>
 </section>
 
+<section class="s" id="built">
+  <div class="a" id="b0" style="left:150px;top:92px;font-size:84px;font-weight:500;opacity:0">Where Switch does the work.</div>
+  <div class="a" style="left:150px;top:236px;width:1620px">
+    <div class="row" id="b1"><div class="l">room documents</div><div class="r">Every agent that joins reads what you decided.</div></div>
+    <div class="row" id="b2"><div class="l">targeted messages</div><div class="r">The question goes straight to Kim.</div></div>
+    <div class="row" id="b3"><div class="l">sender identity</div><div class="r">Only a person's answer counts.</div></div>
+    <div class="row" id="b4"><div class="l">direct posting</div><div class="r">No AI can retype the verdict.</div></div>
+    <div class="row" id="b5"><div class="l">any agent in one room</div><div class="r">Claude Code works. Codex referees.</div></div>
+  </div>
+</section>
+
 <section class="s" id="tag">
   <div class="a" id="t1" style="left:0;top:476px;width:1920px;text-align:center;font-size:88px;font-weight:500;opacity:0">AI agents, without the guessing.</div>
   <div class="a" id="t2" style="left:660px;top:600px;width:600px;height:3px;background:linear-gradient(90deg,transparent,var(--blue),var(--violet),var(--pink),transparent);box-shadow:0 0 30px 5px rgba(90,110,255,.55);opacity:0"></div>
@@ -149,8 +166,9 @@ canvas{position:absolute;left:0;top:0}
   <div class="a mono" id="e5" style="left:0;top:1010px;width:1920px;text-align:center;font-size:18px;color:#4d4d52;opacity:0">Chat scenes and the path chart are illustrations. Questions are shortened from real Claude Code runs. Priya's reply is illustrative.</div>
 </section>
 
+<div id="chip"><span></span></div>
 <script>
-const FILM=44.83, BPM=130, BEAT=60/BPM, T0=.035, bt=n=>T0+n*BEAT, b=n=>n*BEAT;
+const FILM=52.21, BPM=130, BEAT=60/BPM, T0=.035, bt=n=>T0+n*BEAT, b=n=>n*BEAT;
 const clamp=(x,a=0,b=1)=>Math.min(b,Math.max(a,x)), P=(t,a,b)=>clamp((t-a)/(b-a));
 const eo=x=>1-Math.pow(1-x,3), eio=x=>x<.5?4*x*x*x:1-Math.pow(-2*x+2,3)/2;
 const $=id=>document.getElementById(id);
@@ -212,14 +230,19 @@ const SC=[
      el.style.opacity=o});
    rev($('fm'),t,b(16));rev($('fc2'),t,b(14))}},
  {id:'dec',a:bt(48),b:bt(56),f(t){const z=eio(P(t,b(.3),b(3.2)));$('dc').style.transformOrigin='24% 74%';$('dc').style.transform=`scale(${1+z*.34+t*.012})`;rev($('dk'),t,b(.5));rev($('dc1'),t,b(.7),.3,b(3.7));rev($('dd'),t,b(4));rev($('dc2'),t,b(4.2))}},
- {id:'week',a:bt(56),b:bt(72),f(t){const z=eio(P(t,b(10),b(12)));$('week').style.transformOrigin='79% 48%';$('week').style.transform=`scale(${1+z*.14})`;rev($('w0'),t,0,.3,b(2.4));rev($('wc'),t,b(3));rev($('wl'),t,b(4.5));rev($('wc1'),t,b(5),.3,b(8.8));rev($('wr'),t,b(9));rev($('wc2'),t,b(9.2));$('wk').style.borderColor=t>b(13)?'#ffb340':'#2c2c32';$('wk').style.boxShadow=t>b(13)?'0 0 24px rgba(255,179,64,.4)':'none'}},
+ {id:'week',a:bt(56),b:bt(72),f(t){const z=eio(P(t,b(10),b(12)));$('week').style.transformOrigin='50% 40%';$('week').style.transform=`scale(${1+z*.045})`;rev($('w0'),t,0,.3,b(2.4));rev($('wc'),t,b(3));rev($('wl'),t,b(4.5));rev($('wc1'),t,b(5),.3,b(8.8));rev($('wr'),t,b(9));rev($('wc2'),t,b(9.2));$('wk').style.borderColor=t>b(13)?'#ffb340':'#2c2c32';$('wk').style.boxShadow=t>b(13)?'0 0 24px rgba(255,179,64,.4)':'none'}},
  {id:'real',a:bt(72),b:bt(77),f(t){$('rrc').style.transformOrigin='50% 44%';$('rrc').style.transform=`scale(${1+t*.03})`;['rl1','rl2','rl3','rl4','rl5'].forEach((id,i)=>rev($(id),t,[.05,b(.4),b(1),b(2),b(2.25)][i],.22,null,{y:10,blur:6}));rev($('rrcap'),t,b(1.2))}},
  {id:'room',a:bt(77),b:bt(85),f(t){rev($('r1'),t,b(.2));rev($('r3'),t,b(.7));rev($('rc'),t,b(.5));rev($('rj'),t,b(1.2));rev($('rm'),t,b(2));rev($('ra'),t,b(3.5));rev($('r2'),t,b(4.5))}},
- {id:'tag',a:bt(85),b:bt(89),f(t){rev($('t1'),t,b(.2));$('t2').style.opacity=eo(P(t,b(1),b(1.8)));$('t2').style.transform=`scaleX(${eo(P(t,b(1),b(2.2)))})`}},
- {id:'end',a:bt(89),b:FILM,f(t){rev($('e1'),t,.05);rev($('e2'),t,b(1));rev($('e3'),t,b(2));rev($('e4'),t,b(3));rev($('e5'),t,b(3.5))}},
+ {id:'built',a:bt(85),b:bt(101),f(t){$('built').style.transform=`scale(${1+t*.004})`;rev($('b0'),t,b(.2));['b1','b2','b3','b4','b5'].forEach((id,i)=>rev($(id),t,b(2+i*2.5)))}},
+ {id:'tag',a:bt(101),b:bt(105),f(t){rev($('t1'),t,b(.2));$('t2').style.opacity=eo(P(t,b(1),b(1.8)));$('t2').style.transform=`scaleX(${eo(P(t,b(1),b(2.2)))})`}},
+ {id:'end',a:bt(105),b:FILM,f(t){rev($('e1'),t,.05);rev($('e2'),t,b(1));rev($('e3'),t,b(2));rev($('e4'),t,b(3));rev($('e5'),t,b(3.5))}},
 ];
+const CHIPS=[[20.5,28,'people and agents in one room'],[36,42,'a targeted message goes to kim'],[48.5,52,'the name comes from the room'],
+ [52,56,'saved as a room document'],[65.5,72,'the harness posts this itself'],[79.5,85,'every agent reads the room document']];
 window.DURATION=FILM;
 window.seek=function(T){ let active=null; for(const s of SC){const on=T>=s.a&&T<s.b; const el=$(s.id); el.style.display=on?'block':'none'; if(on) active=s;}
+  const c=CHIPS.find(([from,to])=>T>=bt(from)&&T<bt(to)), chip=$('chip');
+  if(c){chip.firstElementChild.innerHTML='<b>Switch</b> · '+c[2];const pi=eo(P(T,bt(c[0]),bt(c[0])+.22)),po=P(T,bt(c[1])-.2,bt(c[1]));chip.style.opacity=pi*(1-po);chip.style.transform=`translateY(${(1-pi)*-12}px)`}else chip.style.opacity=0;
   if(!active) return; const lt=T-active.a, el=$(active.id); const outP=P(T,active.b-.16,active.b); el.style.opacity=1-outP; el.style.filter=outP>0?`blur(${outP*22}px)`:'none'; active.f(lt); };
 window.chartStill=function(){ };
 seek(0);

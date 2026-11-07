@@ -98,7 +98,9 @@ someone non-technical could answer. Reply with JSON only, no other text:
 ROW_TASK = """The harness found these differences. For each one, decide whether two or more options are things a
 reasonable person could really mean, and whether the answer changes what gets built. If so, keep the question, even if
 another option is silly: leave a silly option out of "options" and rewrite the rest in plain words, keeping their letters.
-Set worth_asking to false, and say why, only when just one option is reasonable, or when the input can't really happen.
+Set worth_asking to false, and say why, only when just one option is reasonable, or when the input can't really happen,
+like a negative age or a huge made-up number. List the questions in order of how much damage a wrong answer would do,
+worst first: deleting something matters more than an edge case.
 
 {questions}"""
 
@@ -332,6 +334,14 @@ def keep_to_budget(found, answered, limit=QUESTION_LIMIT):
     return found
 
 
+def promote(found, answered):
+    """Fixing the checks didn't settle it, so the person decides, within what is left of the budget."""
+    waiting = [item for item in found["dropped"] if "enough questions" not in (item.get("why") or "")]
+    found["dropped"] = [item for item in found["dropped"] if item not in waiting]
+    found["questions"], found["conflicts"] = found["questions"] + waiting, []
+    return keep_to_budget(found, answered)
+
+
 def question_text(question):
     owner = f" (for {question['owner']})" if question.get("owner") else ""
     lines = [f"{question['id']}{owner}: {question['ask']}"]
@@ -373,6 +383,8 @@ def last_check_rows(think, request, settled, assumed, questions):
         kept = [option for option in question["options"] if labels.get(option["label"])]
         if len(kept) >= 2:  # a person only sees what a reasonable person could mean
             question["options"] = [{**option, "label": letter} for letter, option in zip("ABCDEFGH", kept)]
+    order = [item.get("id") for item in data["questions"] if isinstance(item, dict)]
+    questions.sort(key=lambda entry: order.index(entry["id"]) if entry["id"] in order else len(order))
     return None
 
 

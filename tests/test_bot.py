@@ -18,6 +18,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import proof  # noqa: E402
 import readings  # noqa: E402
+import switchlink  # noqa: E402
 import whatsapp_bot  # noqa: E402
 
 CALC = "def add(a, b):\n    return a - b\n"
@@ -184,6 +185,7 @@ with tempfile.TemporaryDirectory() as directory:
     state, report = shop("shop_ignore", "shop_ignore", lambda text: "B")  # updates the check, then builds the old thing
     assert state["verdict"] == "NOT DONE", report
     assert "FAIL does not do what you decided" in report, report
+    assert proof.load_decisions(settings(root, Path(state["workspace"]))), "an answer stands even when the job fails"
 
     state, report = shop("shop_clear", "shop", lambda text: 1 / 0, readers="agree")  # one meaning: nobody is bothered
     assert state["verdict"] == "DONE AND PROVEN" and "check_price.py: 1 meaning(s)" in report, report
@@ -242,7 +244,7 @@ with tempfile.TemporaryDirectory() as directory:
         return shared, folder, number
 
     shared, folder, number = team("team_change", "B")  # the person who decided agrees to change it
-    assert not proof.load_decisions(shared), "the old decision must be gone"
+    assert [entry["job"] for entry in proof.load_decisions(shared)] == [int(number)], "the old decision must be gone"
     assert not proof.load_library(shared), "its old proof must stop binding the workspace"
     proof.seal(shared, number)
     (folder / "shop.py").write_text("def price(subtotal, member, coupon):\n    pct = 10 if member and subtotal > 50 else 0\n"
@@ -261,6 +263,25 @@ with tempfile.TemporaryDirectory() as directory:
     print("PASS: a clear request that goes against a teammate's decision stops before any work, goes to that "
           "teammate, and can be kept or changed.")
 
+    # A proven rule stops a clash before the work even if nobody was ever asked, or the answer was in plain words.
+    os.environ["FAKE_MODE"], os.environ["FAKE_READERS"] = "shop", "agree"
+    folder = workspace(root, "proven_clash")
+    (folder / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (folder / "shop.py").write_text("def price(subtotal, member, coupon):\n    return subtotal\n", encoding="utf-8")
+    shared = settings(root, folder)
+    first, _ = proof.run_job(shared, REQUEST)
+    assert first["verdict"] == "DONE AND PROVEN" and not proof.load_decisions(shared), first["verdict"]
+    number = proof.begin(shared, "A coupon should replace the member discount.", who="sam")
+    (folder / "proof_checks" / "check_price.py").write_text(BEST_CHECK.replace(
+        "pct = 10 if member and subtotal > 50 else 0\n    return round(subtotal * (1 - max(pct, coupon) / 100), 2)\n",
+        "pct = coupon if coupon else (10 if member and subtotal > 50 else 0)\n    return round(subtotal * (1 - pct / 100), 2)\n"), encoding="utf-8")
+    proof.seal(shared, number)
+    questions = proof.open_questions(proof.load_state(proof.job_dir(shared, number)))
+    assert questions and questions[0]["id"] == "d1" and "goes against what an earlier job settled" in questions[0]["ask"], questions
+    proof.answer_question(shared, number, "d1", "B", "kim")
+    assert not proof.load_library(shared), "changing the rule retires its old proof"
+    print("PASS: a proven rule stops a clashing request before the work, even if nobody was ever asked about it.")
+
     # A correction is a job, so it can't end in an explanation, and it binds what comes after it.
     os.environ["FAKE_MODE"], os.environ["FAKE_READERS"] = "honest", "agree"
     corrected = settings(root, workspace(root, "correction"))
@@ -275,6 +296,13 @@ with tempfile.TemporaryDirectory() as directory:
     assert "Fix the whole kind of" in proof.checks_prompt("Stop doing that.", correction=True)
     assert "These bind you" not in proof.checks_prompt("Add subtract to calc.py.")
     assert 'keep the description but lose the thing are "wrong"' in proof.review_prompt("A chart, spread out.", [])
+
+    full = {"ok": True, "questions": [], "conflicts": ["x"], "dropped": [
+        {"id": "q1", "worth": False, "why": "you have already answered enough questions on this job"}, {"id": "q2", "worth": False, "why": "silly"}]}
+    readings.promote(full, 3)
+    assert not full["questions"], "the limit is three for the whole job"
+    full = {"ok": True, "questions": [], "conflicts": ["x"], "dropped": [{"id": "q2", "worth": False, "why": "silly"}]}
+    assert [item["id"] for item in readings.promote(full, 1)["questions"]] == ["q2"]
 
     many = {"ok": True, "questions": [{"id": f"q{n}", "worth": True} for n in range(4)], "dropped": []}
     kept = readings.keep_to_budget(many, 2)
@@ -315,6 +343,87 @@ with tempfile.TemporaryDirectory() as directory:
         assert state["verdict"] == "NOT DONE", (cheat, report)
         assert "in separate processes" in report, (cheat, report)
     print("PASS: exiting early, forging a line of output, an object that equals anything and a patched loop are all caught.")
+
+    # 2g. Inside a Switch session the harness talks to the room itself, against a fake Switch server here.
+    posted, timeline = [], []
+
+    class FakeSwitch(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            allowed = self.headers.get("Authorization") == "Bearer swlr_test"
+            if self.path == "/agents/a1/message":
+                posted.append(body)
+                result = {"ok": True}
+            elif self.path == "/agents/a1/ops/list_rooms":
+                result = {"result": [{"room_id": "r1", "name": "proof-room"}, {"room_id": "r2", "name": "other"}]}
+            elif self.path == "/agents/a1/ops/get_room_detail":
+                result = {"result": {"agent_names": ["proof-doer", "proof-referee"], "connected_user_names": ["kim", "sam"]}}
+            elif self.path == "/agents/a1/ops/read_context":
+                result = {"result": {"threads": [{"root": entry, "replies": []} for entry in timeline]}}
+            else:
+                allowed = False
+            self.send_response(200 if allowed else 403)
+            self.end_headers()
+            self.wfile.write(json.dumps(result if allowed else {}).encode())
+
+        def log_message(self, *args):
+            pass
+
+    fake = ThreadingHTTPServer(("127.0.0.1", 0), FakeSwitch)
+    threading.Thread(target=fake.serve_forever, daemon=True).start()
+    link = {"SWITCH_API_ENDPOINT": f"http://127.0.0.1:{fake.server_address[1]}", "SWITCH_API_TOKEN": "swlr_test", "SWITCH_AGENT_ID": "a1"}
+
+    try:
+        switchlink.Room("proof-room", env={})
+        raise AssertionError("no session, so no room")
+    except switchlink.SwitchError as error:
+        assert "isn't running inside a Switch session" in str(error)
+    room = switchlink.Room("proof-room", env=link)
+    assert room.id == "r1"
+    for body, reply, want in (("A", "A", True), ("a.", "A", True), ("@proof-referee A", "A", True), ("A lot of it", "A", False),
+                              ("B", "A", False), ("option b", "B", True), ("keep them all please", "keep them", True)):
+        assert switchlink.says(body, reply) is want, (body, reply)
+    timeline[:] = [{"id": "m1", "kind": "message", "sender_name": "proof-doer", "body": "A", "timestamp": 5000},
+                   {"id": "m2", "kind": "message", "sender_name": "kim", "body": "A", "timestamp": 1000},
+                   {"id": "m3", "kind": "room_join", "sender_name": "sam", "body": "A", "timestamp": 6000}]
+    assert room.confirm("A", 2000) is None, "an agent's word, an old message or a join can't count as an answer"
+    timeline.append({"id": "m4", "kind": "message", "sender_name": "kim", "body": "a", "timestamp": 7000})
+    assert room.confirm("A", 2000)["id"] == "m4"
+
+    os.environ["FAKE_MODE"], os.environ["FAKE_READERS"] = "shop", "split"
+    folder = workspace(root, "direct")
+    (folder / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (folder / "shop.py").write_text("def price(subtotal, member, coupon):\n    return subtotal\n", encoding="utf-8")
+    (folder / "proof_checks").mkdir()
+    (folder / "proof_checks" / "check_price.py").write_text(BEST_CHECK, encoding="utf-8")
+
+    def cli(*args, session=link):
+        environment = {**os.environ, **session, "AGENT": "codex", "CHECK_RUNNER": "direct", "REVIEW": "off",
+                       "CODEX_COMMAND": f'"{sys.executable}" "{HERE / "fake_codex.py"}"'}
+        return subprocess.run([sys.executable, str(HERE.parent / "proof.py"), "--env", str(HERE / "no.env"), "--workspace", str(folder),
+                               "--home", str(root / "home_direct"), "--room", "proof-room", *args], capture_output=True, text=True, env=environment)
+
+    number = cli("begin", "Members get 10% off orders over $50, and coupons don't stack.").stdout.split()[-1]
+    posted.clear()
+    timeline.clear()
+    sealed = cli("seal", number)
+    assert "Posted to the room by the harness." in sealed.stdout, sealed.stdout + sealed.stderr
+    assert posted and posted[0]["room_id"] == "r1" and "WHAT DID YOU MEAN?" in posted[0]["content"], posted
+    refused = cli("answer", number, "q1", "B", "--who", "someone an AI made up")
+    assert refused.returncode == 1 and "Only a person's answer counts" in refused.stderr, refused
+    timeline.append({"id": "m9", "kind": "message", "sender_name": "kim", "body": "B", "timestamp": int(time.time() * 1000) + 1000})
+    answered = cli("answer", number, "q1", "B", "--who", "someone an AI made up")
+    assert "Recorded from kim:" in answered.stdout, answered.stdout + answered.stderr
+    state = proof.load_state(root / "home_direct" / "jobs" / number)
+    assert state["answers"][0]["who"] == "kim" and state["answers"][0]["confirmed"] == "m9", state["answers"]
+    assert "YOU DECIDED (kim, confirmed by Switch):" in "\n".join(proof.meaning_lines(state)), state["answers"]
+    alone = cli("seal", number, session={"SWITCH_API_ENDPOINT": "", "SWITCH_API_TOKEN": "", "SWITCH_AGENT_ID": ""})
+    assert alone.returncode == 0 and "WARN not connected to the Switch room" in alone.stdout, alone.stdout + alone.stderr
+    down = cli("seal", number, session={**link, "SWITCH_API_ENDPOINT": "http://127.0.0.1:9"})
+    assert down.returncode == 0 and "WARN not connected to the Switch room" in down.stdout, down.stdout + down.stderr
+    fake.shutdown()
+    print("PASS: inside Switch the harness posts its own verdict, only a person's answer counts, the name comes from "
+          "Switch, and a room it can't reach never stops a job.")
 
     # 3. Receipts: genuine, edited message, edited evidence.
     home_settings = settings(root, Path(honest["workspace"]))
