@@ -4,7 +4,8 @@ How a job runs:
 1. The harness snapshots the workspace and runs your test suite.
 2. The agent writes acceptance checks for the task in proof_checks/, without doing the task.
 3. The harness seals a copy of those checks outside the workspace and runs them. They must
-   fail now; a check that already passes proves nothing.
+   fail now; a check that already passes proves nothing. Readers then spread across what the
+   request could mean, and any real difference becomes a question for the person (readings.py).
 4. The agent does the task.
 5. The harness runs its sealed copy of the checks and your test suite again, diffs the
    workspace, scans the diff for the usual ways of faking it, and writes a report with a
@@ -25,6 +26,8 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import readings
 
 CHECK_DIR = "proof_checks"
 MESSAGE_LIMIT = 4000  # WhatsApp allows 4096 characters per message
@@ -59,18 +62,32 @@ def tail(text, size=300):
     return text if len(text) <= size else "..." + text[-size:]
 
 
+def find_codex():
+    """Codex installs under a versioned folder on Windows, so look for the newest one."""
+    base = Path(os.environ.get("LOCALAPPDATA", ""))
+    found = [*(base / "OpenAI" / "Codex" / "bin").glob("*/codex.exe"),
+             base / "Programs" / "OpenAI" / "Codex" / "bin" / "codex.exe"]
+    found = sorted((path for path in found if path.is_file()), key=lambda path: path.stat().st_mtime)
+    return str(found[-1]) if found else None
+
+
 class Settings:
     """Where the agent works, where the harness keeps its evidence, and how things run."""
 
-    def __init__(self, workspace, home, codex=None, runner="sandbox", test_command=None, timeout=1800, python=None,
-                 review="on"):
+    def __init__(self, workspace, home, codex=None, runner=None, test_command=None, timeout=1800, python=None,
+                 review="on", agent=None, reading="on"):
         self.workspace = Path(workspace).resolve()
         self.home = Path(home).resolve()
         if self.home == self.workspace or self.workspace in self.home.parents or self.home in self.workspace.parents:
             raise ValueError("Keep the harness home and the workspace in separate folders, or the agent could edit the evidence.")
-        installed = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "OpenAI" / "Codex" / "bin" / "codex.exe"
-        found = shutil.which("codex") or (str(installed) if installed.is_file() else "codex")
-        self.codex = split_command(codex) if codex else [found]
+        self.codex = split_command(codex) if codex else [shutil.which("codex") or find_codex() or "codex"]
+        claude = shutil.which("claude")
+        self.claude = [claude or "claude"]
+        self.agent = agent or ("codex" if codex else "claude" if claude else "codex")
+        if self.agent not in ("claude", "codex"):
+            raise ValueError("AGENT must be claude or codex.")
+        # The sandbox comes from Codex. With Claude Code the agent gets file tools only, and checks run as you.
+        runner = runner or ("sandbox" if self.agent == "codex" else "direct")
         if runner not in ("sandbox", "direct"):
             raise ValueError("CHECK_RUNNER must be sandbox or direct.")
         self.runner, self.test_command, self.timeout = runner, test_command or None, int(timeout)
@@ -78,12 +95,16 @@ class Settings:
         if review not in ("on", "off"):
             raise ValueError("REVIEW must be on or off.")
         self.review = review
+        if reading not in ("on", "off"):
+            raise ValueError("READINGS must be on or off.")
+        self.reading = reading
 
     @classmethod
     def from_env(cls, env):
         return cls(env["WORKSPACE"], env.get("PROOF_HOME") or Path(__file__).with_name("home"),
-                   env.get("CODEX_COMMAND"), env.get("CHECK_RUNNER", "sandbox"), env.get("TEST_COMMAND"),
-                   env.get("AGENT_TIMEOUT", 1800), env.get("CHECK_PYTHON"), env.get("REVIEW", "on"))
+                   env.get("CODEX_COMMAND"), env.get("CHECK_RUNNER"), env.get("TEST_COMMAND"),
+                   env.get("AGENT_TIMEOUT", 1800), env.get("CHECK_PYTHON"), env.get("REVIEW", "on"),
+                   env.get("AGENT"), env.get("READINGS", "on"))
 
 
 def load_env(path):
@@ -95,7 +116,7 @@ def load_env(path):
                 key, value = line.split("=", 1)
                 values[key.strip()] = value.strip().strip('"').strip("'")
     known = ("WORKSPACE", "PROOF_HOME", "CODEX_COMMAND", "CHECK_RUNNER", "TEST_COMMAND", "AGENT_TIMEOUT", "CHECK_PYTHON", "REVIEW",
-             "WHATSAPP_TOKEN", "PHONE_NUMBER_ID", "APP_SECRET", "VERIFY_TOKEN", "OWNER_NUMBER", "GRAPH_BASE", "PORT")
+             "AGENT", "READINGS", "WHATSAPP_TOKEN", "PHONE_NUMBER_ID", "APP_SECRET", "VERIFY_TOKEN", "OWNER_NUMBER", "GRAPH_BASE", "PORT")
     values.update({key: os.environ[key] for key in known if key in os.environ})
     return values
 
@@ -269,15 +290,27 @@ def sandbox_works(settings):
     return probe["ok"], probe["tail"]
 
 
+def fresh_env():
+    """Claude Code can refuse to start inside another session, and a Switch agent runs the harness from inside one."""
+    return {key: value for key, value in os.environ.items() if key != "CLAUDECODE"}
+
+
 def run_agent(settings, job, phase, prompt):
-    """Run Codex once, fully automatic, sandboxed to the workspace. The prompt goes in on standard input."""
+    """Run the agent once, fully automatic, limited to the workspace. The prompt goes in on standard input."""
     last = job / f"{phase}-reply.txt"
-    command = [*settings.codex, "exec", "-s", "workspace-write", *SANDBOX_FLAGS, "-C", str(settings.workspace),
-               "--skip-git-repo-check", "--color", "never", "-o", str(last), "-"]
+    if settings.agent == "claude":  # file tools only: it can edit the workspace, but it can't run anything
+        command = [*settings.claude, "-p", "--output-format", "text", "--no-session-persistence",
+                   "--permission-mode", "acceptEdits", "--tools", "Read", "Edit", "Write", "Glob", "Grep"]
+    else:
+        command = [*settings.codex, "exec", "-s", "workspace-write", *SANDBOX_FLAGS, "-C", str(settings.workspace),
+                   "--skip-git-repo-check", "--color", "never", "-o", str(last), "-"]
     try:
-        result = subprocess.run(command, input=prompt.encode("utf-8"), capture_output=True, timeout=settings.timeout)
+        result = subprocess.run(command, cwd=settings.workspace, input=prompt.encode("utf-8"), capture_output=True,
+                                timeout=settings.timeout, env=fresh_env())
         code = result.returncode
         log = (result.stdout + result.stderr).decode("utf-8", "replace")
+        if settings.agent == "claude":
+            last.write_bytes(result.stdout)
     except subprocess.TimeoutExpired as error:
         code, log = "timeout", ((error.stdout or b"") + (error.stderr or b"")).decode("utf-8", "replace")
     (job / f"{phase}-log.txt").write_text(log, encoding="utf-8")
@@ -285,14 +318,48 @@ def run_agent(settings, job, phase, prompt):
     return {"code": code, "reply": reply}
 
 
-def checks_prompt(request):
+def ask_ai(settings, folder, prompt, timeout=600):
+    """One question to an AI that can read nothing and change nothing. Returns its reply."""
+    folder.mkdir(parents=True, exist_ok=True)
+    last = folder / "reply.txt"
+    last.unlink(missing_ok=True)
+    if settings.agent == "claude":
+        command = [*settings.claude, "-p", "--output-format", "text", "--no-session-persistence", "--tools", ""]
+        result = subprocess.run(command, cwd=folder, input=prompt.encode("utf-8"), capture_output=True, timeout=timeout,
+                                env=fresh_env())
+        (folder / "log.txt").write_bytes(result.stderr)
+        if result.returncode:
+            raise OSError(f"claude exited with {result.returncode}: {tail(result.stdout.decode('utf-8', 'replace'), 120)}")
+        last.write_bytes(result.stdout)
+    else:
+        command = [*settings.codex, "exec", "-s", "read-only", "-C", str(folder), "--skip-git-repo-check",
+                   "--color", "never", "-o", str(last), "-"]
+        result = subprocess.run(command, input=prompt.encode("utf-8"), capture_output=True, timeout=timeout)
+        (folder / "log.txt").write_bytes(result.stdout + result.stderr)
+    return last.read_text(encoding="utf-8", errors="replace") if last.exists() else ""
+
+
+def standing(settled):
+    """What the person already settled here. It binds the agent, so nobody has to say it twice."""
+    if not settled:
+        return ""
+    return "\nAlready decided for this workspace. These bind you:\n" + "\n".join(f"- {line}" for line in settled) + "\n"
+
+
+CORRECTION = """
+This task is a correction: the owner is telling you something went wrong. Don't explain or apologise. Fix the whole kind of
+mistake, not only the one case they named, and write checks that fail on the old behaviour and on other cases of it.
+"""
+
+
+def checks_prompt(request, settled=(), correction=False):
     return f"""You are preparing proof for a task. Do NOT do the task itself yet.
 
 The owner's task, word for word:
 <<<
 {request}
 >>>
-
+{standing(settled)}{CORRECTION if correction else ""}
 Write acceptance checks in the folder {CHECK_DIR}/ of this workspace:
 - One Python file per requirement, named check_<short_name>.py, using only the standard library.
 - Start each file with a docstring that states the requirement in plain words, quoting the owner where you can.
@@ -304,20 +371,23 @@ Write acceptance checks in the folder {CHECK_DIR}/ of this workspace:
   list (every option, like each role, status, customer type or flag; for numbers cover negatives, zero and edge
   values; at most 10 million combinations in all), plus run(**inputs), which
   calls the code and returns its output, and expected(**inputs), which returns the right output. The harness tries
-  every combination and maps every input to its output. Assert the owner's own example at the top too.
-  Where inputs can't be listed (free text, files), test many varied inputs in a loop instead.
+  every combination and maps every input to its output. expected must work out the answer by itself: it runs without
+  the project, so it can't call the code being checked. It returns one answer, never a set of acceptable answers: if the
+  task leaves something open, pick the most sensible reading and others will check it. Assert the owner's example too.
+  Text counts: list realistic examples of each shape it can take (empty, lower case, upper case, mixed, with
+  punctuation). Only where inputs really can't be listed (files, how a page looks) test varied inputs in a loop instead.
 - Every check must FAIL right now, because the task is not done yet.
 - Do not create, change or delete anything outside {CHECK_DIR}/.
 
 Reply with one line per check: its file name and what it proves."""
 
 
-def work_prompt(request, sealed):
+def work_prompt(request, sealed, settled=()):
     return f"""Do this task in this workspace, completely, without asking questions:
 <<<
 {request}
 >>>
-
+{standing(settled)}
 Acceptance checks were written beforehand: {', '.join(sealed) or 'none'}. They are sealed. The harness runs
 its own copy, so editing anything in {CHECK_DIR}/ cannot help and gets the job flagged.
 Do not delete, skip or weaken tests, and do not change test or build settings to make things pass.
@@ -341,7 +411,9 @@ The owner's request, word for word:
 The checks. The task only counts as done if every one of them passes.
 {checks}
 
-Split the request into the separate things the owner asked for, each in the owner's own words, short. For each,
+Split the request into the separate things the owner asked for, each in the owner's own words, short. The main thing
+they asked for comes first: if a request names a thing and then describes it ("a chart, more spread out"), the thing is
+one part and the description another, and checks that keep the description but lose the thing are "wrong". For each,
 name the checks that test it and say whether they test it the way the owner meant:
 - "covered": a check would fail if this part were not done as asked.
 - "narrow": the owner asked for a general rule (like "returns the product" or "fix add"), but the checks try so few
@@ -394,19 +466,10 @@ def review_checks(settings, job, request, sealed):
         return None
     if settings.review == "off":
         return {"ok": False, "error": "the review is turned off (REVIEW=off)"}
-    folder = job / "review"
-    folder.mkdir(exist_ok=True)
-    last = folder / "reply.txt"
-    last.unlink(missing_ok=True)
-    command = [*settings.codex, "exec", "-s", "read-only", "-C", str(folder), "--skip-git-repo-check",
-               "--color", "never", "-o", str(last), "-"]
     try:
-        result = subprocess.run(command, input=review_prompt(request, sealed).encode("utf-8"), capture_output=True,
-                                timeout=600)
-        (folder / "log.txt").write_bytes(result.stdout + result.stderr)
+        reply = ask_ai(settings, job / "review", review_prompt(request, sealed))
     except (OSError, subprocess.TimeoutExpired) as error:
         return {"ok": False, "error": f"the reviewer could not run ({type(error).__name__})"}
-    reply = last.read_text(encoding="utf-8", errors="replace") if last.exists() else ""
     return parse_review(reply, [name for name, _ in sealed])
 
 
@@ -450,6 +513,196 @@ Fix or add checks in {CHECK_DIR}/ so every part of the task is tested as the own
 the owner asked for a general rule. Same rules as before:
 one file per requirement, a docstring quoting the owner, standard library only, and every check must FAIL right
 now. Do not create, change or delete anything outside {CHECK_DIR}/. Reply with one line per check."""
+
+
+def answers_prompt(state):
+    listed = "\n".join(f"- {entry['said']}" for entry in state.get("answers") or [])
+    return f"""Do NOT do the task itself yet. The owner answered questions about what they meant:
+{listed}
+
+The owner's task, word for word:
+<<<
+{state['request']}
+>>>
+
+Update your checks in {CHECK_DIR}/ so they test what the owner just told you, on every input. Same rules as before:
+one file per requirement, a docstring quoting the owner, standard library only, and every check must FAIL right now.
+Do not create, change or delete anything outside {CHECK_DIR}/. Reply with one line per check."""
+
+
+def conflicts_prompt(state):
+    listed = "\n".join(f"- {text}" for text in state["readings"]["conflicts"])
+    return f"""Do NOT do the task itself yet. Your acceptance checks in {CHECK_DIR}/ don't match what was meant:
+{listed}
+
+The owner's task, word for word:
+<<<
+{state['request']}
+>>>
+
+Fix your checks so they test what the owner meant, on many inputs. expected() must work out the one right answer by
+itself, must not call the code being checked, and must not return a set of acceptable answers. Same rules as before: one file per requirement, a docstring quoting the owner,
+standard library only, and every check must FAIL right now. Do not create, change or delete anything outside
+{CHECK_DIR}/. Reply with one line per check."""
+
+
+# ---------------------------------------------------------------- what the person meant
+
+def probe_check(settings, source, name, inputs=None, function="expected", isolated=None):
+    """Call one function from a check on a list of inputs, in its own process. Returns what it found, or None.
+
+    With `isolated` the code is a reader's: it runs in that folder without the project on its path, so a reading
+    can't lean on the code it is judging."""
+    payload = json.dumps({"source": source, "inputs": inputs, "function": function}).encode("utf-8")
+    flags = ["-I"] if isolated else []
+    command = [*runner_prefix(settings), settings.python, *flags, "-c", readings.PROBE,
+               str(settings.workspace / CHECK_DIR / name)]
+    try:
+        result = subprocess.run(command, cwd=isolated or settings.workspace, input=payload, capture_output=True,
+                                timeout=180)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in reversed(result.stdout.decode("utf-8", "replace").splitlines()):
+        if line.startswith(readings.MARK):
+            try:
+                return json.loads(line[len(readings.MARK):])
+            except ValueError:
+                return None
+    return None
+
+
+def recheck(settings, job, name, source):
+    """Run the code and expected() in separate processes and compare plain outputs here, in the harness.
+
+    run_check runs a check inside one process with the code it is judging, so that code could exit early, patch the
+    loop, forge a line of output, or return an object that equals anything. Across processes none of that works, and
+    expected() can't quietly lean on the code either, because the project isn't on its path."""
+    text = source.decode("utf-8", "replace").lstrip("\ufeff")
+    if readings.shape(text) is None:
+        return None
+    isolated = job / "recheck"
+    isolated.mkdir(exist_ok=True)
+    info = probe_check(settings, text, name, None, isolated=isolated)
+    if not info or not info.get("domain"):
+        return None
+    rows, _ = readings.make_rows(info["domain"], name)
+    got = probe_check(settings, text, name, rows, "run")
+    want = probe_check(settings, text, name, rows, "expected", isolated=isolated)
+    if not got or len(got["outputs"]) != len(rows):
+        return {"problem": "the code stopped before every input was tried"}
+    if not want or len(want["outputs"]) != len(rows):
+        return {"problem": "expected() would not run without the project"}
+    for row, mine, right in zip(rows, got["outputs"], want["outputs"]):
+        if readings.key(mine) != readings.key(right):
+            shown = ", ".join(f"{key}={value!r}" for key, value in row.items())
+            return {"problem": f"{shown}: got {readings.says(mine)}, expected {readings.says(right)}"[:200]}
+    return {"rows": len(rows)}
+
+
+def decisions_path(settings):
+    return library_dir(settings) / "decisions.json"
+
+
+def load_decisions(settings):
+    path = decisions_path(settings)
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+
+
+def settled_lines(settings, state):
+    """Everything the person has settled, in this job and in earlier ones, so nobody gets asked twice."""
+    return [entry["said"] for entry in load_decisions(settings) + (state.get("answers") or [])]
+
+
+def read_meaning(settings, job, state, sealed):
+    """Spread the readers across what the request could mean and return what the person needs to be asked."""
+    if settings.reading == "off" or not sealed:
+        return None
+    folder = job / "readings"
+    isolated = folder / "run"
+    isolated.mkdir(parents=True, exist_ok=True)
+    claim = " ".join(check["says"] for check in state.get("checks", []))[:600]
+    found = readings.read_request(
+        state["request"], settled_lines(settings, state), sealed,
+        think=lambda lens, prompt: ask_ai(settings, folder / lens, prompt),
+        probe=lambda name, text, inputs, function: probe_check(settings, text, name, inputs, function),
+        probe_reader=lambda name, text, inputs: probe_check(settings, text, name, inputs, isolated=isolated),
+        pins=state.get("answers") or [], claim=claim)
+    return readings.keep_to_budget(found, len(state.get("answers") or []))
+
+
+def open_questions(state):
+    return (state.get("readings") or {}).get("questions", [])
+
+
+def answer_question(settings, number, question_id, reply, who=""):
+    """Record what the person said. A letter picks an option; anything else is taken as their own words."""
+    job = job_dir(settings, number)
+    state = load_state(job)
+    question = next((item for item in open_questions(state) if item["id"] == question_id), None)
+    if question is None:
+        raise ValueError(f"Job {number} has no open question {question_id}.")
+    reply = reply.strip()
+    pick = next((option for option in question["options"] if option["label"] == reply.upper()), None)
+    entry = {"check": question["check"], "inputs": question["inputs"], "ask": question["ask"], "reply": reply, "who": who}
+    entry["said"] = f"{question['ask']} {pick['says'] if pick else reply}"
+    if pick and "output" in pick:
+        entry["output"] = pick["output"]
+    state.setdefault("answers", []).append(entry)
+    state["readings"]["questions"] = [item for item in open_questions(state) if item["id"] != question_id]
+    save_state(job, state)
+    return entry
+
+
+def check_answers(settings, job, state):
+    """After the work, call the code on the exact inputs the person decided and compare with what they chose."""
+    results = []
+    for entry in state.get("answers") or []:
+        if "output" not in entry:
+            continue
+        sealed = job / "sealed" / entry["check"]
+        found = probe_check(settings, sealed.read_text(encoding="utf-8-sig"), entry["check"], [entry["inputs"]], "run") \
+            if sealed.exists() else None
+        got = found["outputs"][0] if found and found.get("outputs") else None
+        results.append({"said": entry["said"], "got": got, "ok": got is not None and
+                        readings.key(got) == readings.key(entry["output"])})
+    return results
+
+
+def meaning_lines(state):
+    """What the readers found, written for the person who made the request."""
+    found = state.get("readings")
+    if found is None:
+        return []
+    lines = ["", "WHAT DID YOU MEAN?"]
+    if not found.get("ok"):
+        return lines + [f"WARN the readers could not run: {found.get('error')}"]
+    for item in found.get("statements", []):
+        if item.get("error"):
+            lines.append(f"WARN {item['check']}: {item['error']}")
+            continue
+        scope = f"{item['rows']:,} sampled inputs of {item['total']:,}" if item.get("sampled") else f"all {item['rows']:,} inputs"
+        lines.append(f"{item['check']}: {item['meanings']} meaning(s) across {scope}, "
+                     f"{item['differ']:,} input(s) differ (compared by the harness, not by an AI)")
+        lines += [f"- {lens} read it as: {text}" for lens, text in sorted(item.get("assumed", {}).items()) if text]
+        if item.get("agreed"):
+            lines.append(f"- found no other reasonable reading: {', '.join(item['agreed'])}")
+        if item.get("ruled_out"):
+            lines.append(f"- ruled out by your answers: {', '.join(item['ruled_out'])}")
+    if found.get("mode") == "words":
+        lines.append("(these inputs can't be listed, so an AI compared the readings in words)")
+        lines += [f"- {lens} read it as: {reader['assumes']}" for lens, reader in sorted(found.get("readers", {}).items())]
+    for entry in state.get("answers") or []:
+        lines.append(f"YOU DECIDED{' (' + entry['who'] + ')' if entry.get('who') else ''}: {entry['said']}")
+    for item in state.get("answer_results") or []:
+        if not item["ok"]:
+            lines.append(f"FAIL does not do what you decided: {item['said']} It gave {item['got']!r}.")
+    for item in open_questions(state):
+        lines.append("OPEN " + readings.question_text(item))
+    lines += [f"FAIL {text}" for text in found.get("conflicts", [])]
+    lines += [f"NOT ASKED {item['id']}: {item['ask']} ({item.get('why') or 'set aside by the last check'})"
+              for item in found.get("dropped", [])]
+    lines += [f"WARN {text}" for text in found.get("failed", [])]
+    return lines
 
 
 # ---------------------------------------------------------------- jobs
@@ -574,13 +827,36 @@ def relies_on(state):
         out.append("the checks and tests ran without a sandbox, with your full access")
     if state.get("suite_before") is None:
         out.append("no test suite is configured, so only the sealed checks ran")
+    found = state.get("readings")
+    if found is None and state.get("checks"):
+        out.append("nothing looked for other meanings of your request")
+    elif found and not found.get("ok"):
+        out.append("the readers could not run, so other meanings of your request went unchecked")
+    elif found:
+        if found.get("mode") == "words":
+            out.append("an AI, not the harness, compared what your request could mean")
+        elif any(item.get("meanings") == 1 for item in found.get("statements", [])):
+            out.append("readers agreeing on one meaning makes a misunderstanding less likely, not impossible")
+        if any(item.get("sampled") for item in found.get("statements", [])):
+            out.append("readings were compared on a random sample of the inputs, not all of them")
+        if found.get("dropped"):
+            out.append("a difference was not put to you; it is listed under NOT ASKED")
+    inside = [check["name"] for check in checks if not check.get("recheck")]
+    if inside:
+        out.append(f"{', '.join(inside)} ran in one process with the code, so it assumes the code did not tamper with it")
+    if checks:
+        out.append("the code behaves the same under the harness as it does in real use")
     return out or ["nothing beyond the harness itself"]
 
 
-def begin(settings, request):
-    """Step 1: snapshot the workspace and run the test suite and the proven library before anything changes."""
+def begin(settings, request, correction=False):
+    """Step 1: snapshot the workspace and run the test suite and the proven library before anything changes.
+
+    A correction is a job like any other, so it can't end in an explanation: it needs a check that fails on the old
+    behaviour, and once proven that check joins the library and binds every later job."""
     number, job = new_job(settings, request)
     state = load_state(job)
+    state["correction"] = correction
     state["before"] = snapshot(settings)
     state["suite_before"] = run_suite(settings)
     state["library_before"] = run_library(settings)
@@ -609,6 +885,7 @@ def seal(settings, number):
     sealed = [(check["name"], (job / "sealed" / check["name"]).read_bytes()) for check in checks]
     state.update(sealed_tree=tree, checks=checks, strays=[item["path"] for item in strays],
                  review=review_checks(settings, job, state["request"], sealed))
+    state["readings"] = read_meaning(settings, job, state, sealed)
     save_state(job, state)
     return checks
 
@@ -623,6 +900,7 @@ def finish(settings, number, claim=""):
         if digest(source) != check["sha256"]:
             raise RuntimeError(f"sealed copy of {check['name']} changed inside the harness home")
         check["after"] = run_check(settings, source, check["name"])
+        check["recheck"] = recheck(settings, job, check["name"], source)
         try:
             current = read_blob(settings, after, check["path"])
             check["edited"] = digest(current) != check["sha256"]
@@ -631,6 +909,8 @@ def finish(settings, number, claim=""):
     files, lines = diff_files(settings, state["sealed_tree"], after)
     state.update(after=after, claim=claim.strip(), files=files, suite_after=run_suite(settings),
                  finished=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+    if state.get("answers"):
+        state["answer_results"] = check_answers(settings, job, state)
     if "library_before" in state:  # jobs begun before the library existed don't get one
         state["library"] = library_results(settings, state)
     state["scan"] = scan(state, lines, tree_files(settings, after))
@@ -638,6 +918,12 @@ def finish(settings, number, claim=""):
     if "library_before" in state:
         state["library_added"] = add_to_library(settings, state, job) if state["verdict"].startswith("DONE") else []
         state["assumptions"] = relies_on(state)
+        settled = [entry["said"] for entry in state.get("answers") or []]
+        settled += [f"Correction: {state['request']}"] if state.get("correction") else []
+        if state["verdict"].startswith("DONE") and settled:  # remembered, so nobody has to say it twice
+            decisions = load_decisions(settings) + [{"job": number, "said": line} for line in settled]
+            decisions_path(settings).parent.mkdir(parents=True, exist_ok=True)
+            decisions_path(settings).write_text(json.dumps(decisions, indent=2), encoding="utf-8")
     ledger = settings.home / "ledger.jsonl"
     entries = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()] if ledger.exists() else []
     state["previous"] = entries[-1]["receipt"] if entries else None
@@ -655,15 +941,17 @@ def finish(settings, number, claim=""):
 
 EVIDENCE = ("job", "request", "claim", "runner", "before", "sealed_tree", "after", "checks", "strays", "files",
             "suite_before", "suite_after", "scan", "verdict", "previous", "review", "library", "library_added",
-            "assumptions")
+            "assumptions", "readings", "answers", "answer_results")
+ASK_ROUNDS = 3  # each round the person answers, the agent updates its checks, and the readers look again
 
 
-def run_job(settings, request, progress=lambda text: None):
-    """The whole job, start to finish, with Codex doing steps 2 and 4."""
-    number = begin(settings, request)
+def run_job(settings, request, progress=lambda text: None, ask=None, correction=False):
+    """The whole job, start to finish, with the agent doing steps 2 and 4. `ask` puts a question to the person."""
+    number = begin(settings, request, correction)
     job = job_dir(settings, number)
+    settled = [entry["said"] for entry in load_decisions(settings)]
     progress(f"Job {number}: writing the checks that will prove it.")
-    first = run_agent(settings, job, "checks", checks_prompt(request))
+    first = run_agent(settings, job, "checks", checks_prompt(request, settled, correction))
     checks = seal(settings, number)
     gaps = review_gaps(load_state(job).get("review"), ("missing", "wrong", "narrow"))
     if gaps:  # one chance to fix a misunderstanding or a too-narrow check before any work is done
@@ -671,9 +959,27 @@ def run_job(settings, request, progress=lambda text: None):
                  "Fixing the checks first.")
         run_agent(settings, job, "checks-fix", fix_checks_prompt(request, gaps))
         checks = seal(settings, number)
+    for attempt in range(ASK_ROUNDS):
+        state = load_state(job)
+        found = state.get("readings") or {}
+        if ask and attempt and found.get("conflicts") and found.get("dropped"):  # fixing didn't settle it: ask the person
+            found["questions"], found["dropped"], found["conflicts"] = found["questions"] + found["dropped"], [], []
+            save_state(job, state)
+        questions = open_questions(state) if ask else []
+        if questions:
+            progress(f"Job {number}: your request can be read more than one way, so I'm asking before any work starts.")
+            for question in questions:
+                answer_question(settings, number, question["id"], ask(readings.question_text(question)), "owner")
+            run_agent(settings, job, f"checks-answers-{attempt + 1}", answers_prompt(load_state(job)))
+        elif (state.get("readings") or {}).get("conflicts"):
+            progress(f"Job {number}: the checks don't match what was meant. Fixing them before any work starts.")
+            run_agent(settings, job, f"checks-conflict-{attempt + 1}", conflicts_prompt(state))
+        else:
+            break
+        checks = seal(settings, number)
     red = sum(not check["before"]["ok"] for check in checks)
     progress(f"Job {number}: {len(checks)} check(s) sealed, {red} failing as they should. Now doing the work.")
-    second = run_agent(settings, job, "work", work_prompt(request, [check["name"] for check in checks]))
+    second = run_agent(settings, job, "work", work_prompt(request, [check["name"] for check in checks], settled))
     state = load_state(job)
     state["agent_exit"] = {"checks": first["code"], "work": second["code"]}
     save_state(job, state)
@@ -744,11 +1050,20 @@ def scan(state, lines, after_files):
     for check in real:
         if not check["after"]["ok"]:
             item("FAIL", f"{check['name']} still fails: {check['after']['tail'][-120:]}")
+    for check in checks:
+        again = check.get("recheck")
+        if again and again.get("problem"):
+            item("FAIL", f"{check['name']} fails with the code and expected() in separate processes: {again['problem']}")
+        elif again:
+            item("ok", f"{check['name']} holds with the code and expected() in separate processes ({again['rows']:,} inputs)")
     library = state.get("library")
     if library:
         broken = [f"{e['name']} from job {e['job']}" for e in library if not e["after"] and e["before"] is not False]
         item("FAIL" if broken else "ok", f"broke requirements proven in earlier jobs: {', '.join(broken)}" if broken
              else f"none of the {len(library)} requirement(s) proven in earlier jobs was broken")
+    for answer in state.get("answer_results") or []:
+        item("ok" if answer["ok"] else "FAIL", f"does what you decided: {answer['said']}" if answer["ok"]
+             else f"does not do what you decided: {answer['said']} It gave {answer['got']!r}.")
     crashed = {phase: code for phase, code in state.get("agent_exit", {}).items() if code != 0}
     if crashed:
         item("WARN", "the agent run ended with an error: " + ", ".join(f"{p} step exit {c}" for p, c in crashed.items()))
@@ -761,7 +1076,8 @@ def verdict(state):
     if hard:
         return "NOT DONE"
     review = state.get("review")
-    if not real or review_gaps(review):  # part of the request has no check that tests it as meant
+    conflicts = (state.get("readings") or {}).get("conflicts")
+    if not real or review_gaps(review) or open_questions(state) or conflicts:  # what was asked isn't settled yet
         return "UNPROVEN"
     unsure = review is not None and (not review.get("ok") or review.get("extra") or review_gaps(review, ("narrow",)))
     return ("DONE, READ THE WARNINGS" if unsure or any(item["level"] == "WARN" for item in state["scan"])
@@ -810,13 +1126,14 @@ def render(state, limit=MESSAGE_LIMIT):
     else:
         foot = ["", f"Checks ran {'in the Codex sandbox' if state['runner'] == 'sandbox' else 'without a sandbox'}. "
                     f"Check this message: python proof.py verify {state['job']} {state['receipt']}"]
-    text = "\n".join(head + changed + asked + proof1 + proof2 + library + proof3 + foot)
+    meaning = meaning_lines(state)
+    text = "\n".join(head + changed + meaning + asked + proof1 + proof2 + library + proof3 + foot)
     if len(text) > limit:  # keep problems in full, fold the passing scan lines
         good = sum(item["level"] == "ok" for item in state["scan"])
         proof3 = ["", f"PROOF {m}: LOOPHOLE SCAN"] + [f"{item['level']} {item['text'][:200]}"
                                                      for item in state["scan"] if item["level"] != "ok"]
         proof3.append(f"ok {good} other scans passed (full list: python proof.py show {state['job']})")
-        text = "\n".join(head + changed + asked + proof1 + proof2 + library + proof3 + foot)
+        text = "\n".join(head + changed + meaning + asked + proof1 + proof2 + library + proof3 + foot)
     return text[:limit]
 
 
@@ -880,8 +1197,12 @@ def main():
     parser = argparse.ArgumentParser(description="Prove an agent's work. Settings come from .env next to this file.")
     parser.add_argument("--env", default=str(Path(__file__).with_name(".env")))
     commands = parser.add_subparsers(dest="action", required=True)
-    commands.add_parser("run", help="run a whole job with Codex").add_argument("request")
-    commands.add_parser("begin", help="step 1, for an agent that runs the steps itself").add_argument("request")
+    run_parser = commands.add_parser("run", help="run a whole job")
+    run_parser.add_argument("request")
+    run_parser.add_argument("--correction", action="store_true", help="the person is correcting a mistake")
+    begin_parser = commands.add_parser("begin", help="step 1, for an agent that runs the steps itself")
+    begin_parser.add_argument("request")
+    begin_parser.add_argument("--correction", action="store_true", help="the person is correcting a mistake")
     commands.add_parser("seal", help="step 3: seal and run the checks in proof_checks/").add_argument("job", type=int)
     finish_parser = commands.add_parser("finish", help="step 5: prove it and print the report")
     finish_parser.add_argument("job", type=int)
@@ -893,6 +1214,12 @@ def main():
     verify_parser.add_argument("--text", help="file with the posted message, or - for standard input")
     verify_parser.add_argument("--recheck", action="store_true", help="run the sealed checks again now")
     commands.add_parser("doctor", help="check that the sandbox can run the checks")
+    commands.add_parser("questions", help="print what the person still needs to answer").add_argument("job", type=int)
+    answer_parser = commands.add_parser("answer", help="record the person's answer to a question")
+    answer_parser.add_argument("job", type=int)
+    answer_parser.add_argument("question", help="the question's id, such as q1")
+    answer_parser.add_argument("reply", help="an option's letter, or the person's own words")
+    answer_parser.add_argument("--who", default="", help="who answered")
     parser.add_argument("--workspace", help="folder the agent works in (overrides WORKSPACE)")
     parser.add_argument("--home", help="where the harness keeps evidence (overrides PROOF_HOME)")
     args = parser.parse_args()
@@ -914,9 +1241,13 @@ def main():
             sys.exit(0 if ok else 1)
     try:
         if args.action == "run":
-            print(run_job(settings, args.request, print)[1])
+            ask = (lambda text: input(text + "\nYour answer (a letter, or say what you meant): ")) if sys.stdin.isatty() else None
+            print(run_job(settings, args.request, print, ask, args.correction)[1])
         elif args.action == "begin":
-            print(f"job {begin(settings, args.request)}")
+            number = begin(settings, args.request, args.correction)
+            print(standing([entry["said"] for entry in load_decisions(settings)]).strip())
+            print(CORRECTION.strip() if args.correction else "")
+            print(f"job {number}")
         elif args.action == "seal":
             for check in seal(settings, args.job):
                 print(f"{'EMPTY, already passes' if check['before']['ok'] else 'sealed, failing as it should'}: {check['name']}")
@@ -930,6 +1261,24 @@ def main():
             if review_gaps(review, ("narrow",)):
                 print("Some checks try too few inputs. Make them test the rule over many inputs (a loop, or random "
                       "inputs with a fixed seed) and run seal again before doing the work, or the report will warn.")
+            state = load_state(job_dir(settings, args.job))
+            print("\n".join(meaning_lines(state)).strip())
+            if open_questions(state):
+                print(f"STOP. Ask the person these before any work starts, then record each reply with: "
+                      f"proof.py answer {args.job} q1 A")
+            elif (state.get("readings") or {}).get("conflicts"):
+                print("STOP. The checks disagree with what the person decided. Fix them, then seal again.")
+            else:
+                print("One meaning. Work can start.")
+        elif args.action == "questions":
+            state = load_state(job_dir(settings, args.job))
+            print("\n".join(readings.question_text(item) for item in open_questions(state)) or "No open questions.")
+        elif args.action == "answer":
+            entry = answer_question(settings, args.job, args.question, args.reply, args.who)
+            print(f"Recorded: {entry['said']}")
+            left = open_questions(load_state(job_dir(settings, args.job)))
+            print("\n".join(readings.question_text(item) for item in left) if left else
+                  "All answered. Update the checks to match, then seal again.")
         elif args.action == "finish":
             print(finish(settings, args.job, args.claim)[1])
         elif args.action == "show":

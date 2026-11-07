@@ -45,6 +45,8 @@ class Bot:
         self.graph = env.get("GRAPH_BASE", "https://graph.facebook.com/v23.0").rstrip("/")
         self.tasks = queue.Queue()
         self.current = None
+        self.answers = queue.Queue()
+        self.waiting = False
         self.seen_file = self.settings.home / "seen_messages.json"
         self.seen = set(json.loads(self.seen_file.read_text())) if self.seen_file.exists() else set()
         self.seen_lock = threading.Lock()
@@ -72,6 +74,17 @@ class Bot:
             except urllib.error.URLError as error:
                 print(f"Could not reach WhatsApp: {error.reason}")
 
+    def ask(self, text):
+        """Put a question to the owner and wait for the reply. No work starts until they answer."""
+        self.waiting = True
+        self.send(f"{text}\nReply with a letter, or say what you meant.")
+        try:
+            return self.answers.get(timeout=3600)
+        except queue.Empty:
+            raise RuntimeError("nobody answered within an hour, so no work was done") from None
+        finally:
+            self.waiting = False
+
     def first_time(self, message_id):
         """Meta retries webhooks, so act on each message ID once."""
         with self.seen_lock:
@@ -86,6 +99,9 @@ class Bot:
             print(f"Ignored a message from {sender}: only OWNER_NUMBER can give orders.")
             return
         if not self.first_time(message_id):
+            return
+        if self.waiting:
+            self.answers.put(text.strip())
             return
         words = text.strip().split()
         command = words[0].lower() if words else ""
@@ -109,7 +125,7 @@ class Bot:
             request = self.tasks.get()
             self.current = request[:120]
             try:
-                _, report = proof.run_job(self.settings, request, self.send)
+                _, report = proof.run_job(self.settings, request, self.send, self.ask)
                 self.send(report)
             except Exception as error:  # report every failure to the owner rather than dying silently
                 self.send(f"The job stopped before it could be proven: {error}")
@@ -166,7 +182,7 @@ def make_handler(bot):
 def serve(env, port=None):
     bot = Bot(env)
     threading.Thread(target=bot.work, daemon=True).start()
-    server = ThreadingHTTPServer(("127.0.0.1", int(port or env.get("PORT", 8787))), make_handler(bot))
+    server = ThreadingHTTPServer(("127.0.0.1", int(port if port is not None else env.get("PORT", 8787))), make_handler(bot))
     return bot, server
 
 

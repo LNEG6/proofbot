@@ -1,5 +1,6 @@
 """Scripted agents that go wrong, so you can watch Proofbot catch them.
 
+    python lazy_agent.py meaning         # a request with two meanings: readers split, and a person settles it
     python lazy_agent.py misunderstand   # the agent misreads the task; its own check agrees with it
     python lazy_agent.py everyday        # who may edit or delete a post: every combination tried, whole table shown
     python lazy_agent.py regress         # a later job breaks something proven earlier (the proven library)
@@ -45,13 +46,13 @@ def heading(text):
     print(f"\n=== {text}")
 
 
-def harness(*args):
+def harness(*args, env=None):
     """Call proof.py the same way doer does. Its output is shown as is."""
     shown = " ".join(f'"{a}"' if " " in a else a for a in args).replace(str(HOME) + os.sep, "")
     print(f"$ python proof.py {shown}")
     command = [sys.executable, str(PROOF), "--env", str(HERE / "no.env"),
                "--workspace", str(PROJECT), "--home", str(HOME), *args]
-    result = subprocess.run(command, env=ENV, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    result = subprocess.run(command, env=env or ENV, capture_output=True, text=True, encoding="utf-8", errors="replace")
     output = (result.stdout + result.stderr).rstrip()
     print(output)
     return result.returncode, output
@@ -132,6 +133,60 @@ def misunderstand():
     print("\nEvery check the agent wrote passes. Proofbot still says UNPROVEN: the checks don't test what you asked.")
 
 
+def meaning():
+    """AI takes words too literally, and two AIs tend to make the same silent guess. So readers are spread apart on
+    purpose, code compares them on every input, and a person settles the real differences before any work starts."""
+    task = "Members get 10% off orders over $50, and coupons don't stack."
+    formula = ("pct = 10 if member and subtotal > 50 else 0\n"
+               "    return round(subtotal * (1 - max(pct, coupon) / 100), 2)\n")
+    meant = ("pct = coupon if coupon else (10 if member and subtotal > 50 else 0)\n"
+             "    return round(subtotal * (1 - pct / 100), 2)\n")
+    check = ('"""Members get 10% off orders over $50, and coupons don\'t stack."""\nimport shop\n\n'
+             'DOMAIN = {"subtotal": [40, 100], "member": [False, True], "coupon": [0, 5, 20]}\n\n\n'
+             'def run(subtotal, member, coupon):\n    return shop.price(subtotal, member, coupon)\n\n\n'
+             'def expected(subtotal, member, coupon):\n    ')
+    env = {**ENV, "AGENT": "codex", "FAKE_READERS": "split", "FAKE_MODE": "shop", "FAKE_REVIEW": "ok",
+           "CODEX_COMMAND": f'"{sys.executable}" "{HERE.parent / "tests" / "fake_codex.py"}"'}
+    fresh_project("def add(a, b):\n    return a + b\n")
+    (PROJECT / "shop.py").write_text("def price(subtotal, member, coupon):\n    return subtotal\n", encoding="utf-8")
+    print("MEANING DEMO: one sentence, two meanings. The readers here are scripted so this runs anywhere; the harness "
+          "that compares them is real.")
+    print(f'Request in the room: "{task}"')
+    pause()
+
+    heading("Harness: snapshot the project")
+    job = harness("begin", task, env=env)[1].split()[-1]
+    pause()
+
+    heading("Agent: write its reading as a check, over every input. It assumes the bigger discount wins.")
+    write_check("check_price.py", check + formula)
+    pause()
+
+    heading("Harness: seal it, spread the readers, and compare every reading on every input")
+    harness("seal", job, env=env)
+    print("\nThe agent's check is fine and its tests would pass. It just isn't sure to be what you meant, so nothing has "
+          "started.")
+    pause(3)
+
+    heading("A person answers in the room. The AI doesn't get to pick.")
+    harness("answer", job, "q1", "B", "--who", "kim", env=env)
+    pause()
+
+    heading("Agent: update its check to match. Harness: seal again")
+    write_check("check_price.py", check + meant)
+    harness("seal", job, env=env)
+    pause()
+
+    heading("Agent: do the work")
+    (PROJECT / "shop.py").write_text(f"def price(subtotal, member, coupon):\n    {meant}", encoding="utf-8")
+    print("shop.py:\n    " + (PROJECT / "shop.py").read_text(encoding="utf-8").strip().replace("\n", "\n    "))
+    pause()
+
+    heading("Harness: prove it")
+    harness("finish", job, "--claim", "Changed shop.py.", env=env)
+    print("\nThe answer is now part of the proof, and it's remembered, so the team never gets asked again.")
+
+
 def cheat():
     task = "Fix add in calc.py so add(2, 3) returns 5."
     check = ('"""Fix add in calc.py so add(2, 3) returns 5."""\nimport calc\n\n'
@@ -182,7 +237,7 @@ def cheat():
     real_file = HOME / "real_message.txt"
     real_file.write_text(report, encoding="utf-8")
     harness("verify", job, receipt, "--text", str(real_file))
-    print("\nThe agent can cheat on the work and lie in the chat. It can't get a DONE past Proofbot.")
+    print("\nEditing the tests, or the verdict in the chat, doesn't get a DONE past Proofbot. README > Limits lists what can.")
 
 
 def regress():
@@ -285,10 +340,10 @@ def permissions():
     print("\nDONE AND PROVEN: all 18 cases tried, and the report shows every one, so you can read the rule yourself.")
 
 
-SCENES = {"misunderstand": misunderstand, "everyday": permissions, "regress": regress, "cheat": cheat}
+SCENES = {"meaning": meaning, "misunderstand": misunderstand, "everyday": permissions, "regress": regress, "cheat": cheat}
 
 if __name__ == "__main__":
     names = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
     if len(names) != 1 or names[0] not in SCENES:
-        sys.exit("Usage: python lazy_agent.py misunderstand|everyday|regress|cheat [--step]")
+        sys.exit("Usage: python lazy_agent.py meaning|misunderstand|everyday|regress|cheat [--step]")
     SCENES[names[0]]()

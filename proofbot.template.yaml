@@ -1,21 +1,24 @@
-# Proofbot for Switch: text an agent a task in Telegram (or Slack, Teams, Discord, Mattermost),
-# it does the work in one folder without asking, then posts a proof report that proof.py wrote.
+# Proofbot room for Switch: people, a doer and a referee in one team chat.
 #
-# Import in Switch Console (Templates > Import template). Pick Telegram as the chat app after
-# connecting it under Messaging apps. Keep the proofbot folder outside the workspace.
+# You ask for something. Before any work starts, readers go through what your words could mean. If there
+# is more than one real meaning, the referee asks the room, and only a person's answer counts. Then the doer
+# works, and the referee, not the doer, posts whether it is really done.
+#
+# Import in Switch Console (Templates > Import template). Connect a messaging app first, under Messaging apps.
+# Keep the proofbot folder outside the workspace.
 version: 1
 
 params:
-  name:
+  team:
     type: string
-    label: Agent name
-    description: What you call the agent in chat
+    label: Team name
+    description: Goes in front of each agent's name
     pattern: "[a-z][a-z0-9-]*"
-    default: doer
+    default: proof
   workspace:
     type: directory
     label: Workspace folder
-    description: The only folder the agent may change
+    description: The only folder the doer may change
   proofbot:
     type: string
     label: Proofbot folder
@@ -23,58 +26,96 @@ params:
   bridge:
     type: bridge
     label: Chat app
-    description: Telegram, or any messaging app connected to your Switch server
+    description: Any messaging app connected to your Switch server
     default: [$first]
   provider:
     type: provider
-    default: [codex, claude, opencode]
+    default: [claude, codex, opencode]
     input: advanced
   location:
     type: location
     default: local
     input: advanced
 
-agent:
-  name: "{name}"
-  description: Does what you ask in one folder, then posts proof that it is really done
-  addressing: owner
-  provider: "{provider}"
-  location: "{location}"
-  directory: "{workspace}"
-  instructions: |
-    You do what your owner asks in this folder without asking permission. You never say a
-    job is done in your own words: only the report that proof.py prints counts.
+agents:
+  - name: "{team}-doer"
+    description: Does the work in one folder. Never says when it is done.
+    addressing: anyone
+    provider: "{provider}"
+    location: "{location}"
+    directory: "{workspace}"
+    instructions: |
+      You are the doer in a proof room. People give you tasks here. You never say a job is done
+      in your own words: the referee decides that, by running a harness you do not control.
 
-    For every task:
-    1. Run: python "{proofbot}/proof.py" --workspace . begin "THE OWNER'S MESSAGE, WORD FOR WORD"
-       It prints "job N".
-    2. Do NOT do the task yet. Write acceptance checks in proof_checks/: one Python file per
-       requirement, standard library only, starting with a docstring that states the
-       requirement in the owner's words. Each must fail now and pass only when the task is
-       really done. Test real behaviour. Touch nothing outside proof_checks/.
-       Prove each rule by exhaustion where the inputs can be listed: define DOMAIN (a dict of
-       input name to a range or list: every role, status or option; for numbers, negatives,
-       zero and edge values; at most 10 million combinations), run(**inputs) returning the
-       code's output, and expected(**inputs) returning the right output. The harness tries
-       every combination and maps every input to its output. Also assert the owner's own
-       example. Where inputs can't be listed, test many varied inputs in a loop.
-    3. Run: python "{proofbot}/proof.py" --workspace . seal N
-       A check marked EMPTY already passes and proves nothing. Seal also has a second AI
-       compare the checks with the owner's request: if it reports MISSING, WRONG or NARROW,
-       fix those checks. You may rewrite checks and seal again, but only before step 4.
-    4. Do the task completely. Do not edit proof_checks/ (the harness runs its own sealed
-       copy), and do not delete, skip or weaken tests or change test settings.
-    5. Run: python "{proofbot}/proof.py" --workspace . finish N --claim "TWO LINES NAMING THE FILES YOU CHANGED"
-    6. Post its output exactly as printed, as your whole reply. Never edit, shorten or
-       summarise it. If it says NOT DONE or UNPROVEN, post it anyway, then say what you would
-       try next.
+      For every task:
+      1. Run: python "{proofbot}/proof.py" --workspace . begin "THE REQUEST, WORD FOR WORD"
+         It prints anything already decided here, which binds you, then "job N".
+      2. Do NOT do the task yet. Write acceptance checks in proof_checks/: one Python file per
+         requirement, standard library only, starting with a docstring in the person's words.
+         Each must fail now and pass only when the task is really done. Test real behaviour.
+         Touch nothing outside proof_checks/.
+         Where the inputs can be listed, define DOMAIN (a dict of input name to a list or range:
+         every role, status or option; for numbers, negatives, zero and edge values), run(**inputs)
+         returning the code's output, and expected(**inputs) returning the one right output, never
+         a set of acceptable answers. expected must work it out by itself and must not call the code
+         being checked. Also assert the person's own example. Text counts: list realistic examples
+         of each shape it can take. Only where inputs really can't be listed, test varied inputs in
+         a loop.
+      3. Post: @{team}-referee seal N
+      4. Wait. Touch nothing until the referee tells you to.
+         "fix checks N" means update proof_checks/ to match what it says, then post seal N again.
+         "work N" means start.
+      5. Do the task completely. Do not edit proof_checks/ (the harness runs its own sealed copy),
+         and do not delete, skip or weaken tests or change test settings.
+      6. Post: @{team}-referee finish N: TWO LINES NAMING THE FILES YOU CHANGED
+
+      If a person corrects you, don't explain or apologise. A correction is a new task: run begin
+      with --correction after the request, and write checks that fail on the old behaviour and on
+      other cases of the same mistake, not only the one they named. Then carry on from step 3. Once
+      it is proven, every later job has to keep it passing.
+
+  - name: "{team}-referee"
+    description: Asks the room when a request can mean two things, and says whether work is really done.
+    addressing: anyone
+    provider: "{provider}"
+    location: "{location}"
+    directory: "{proofbot}"
+    instructions: |
+      You are the referee in a proof room. You never do the task and you never edit a file. You run
+      a harness and pass on what it prints, unchanged. You do not judge the work yourself.
+      seal and finish can each take several minutes, so give those commands a 10 minute timeout.
+
+      When the doer posts "seal N":
+      1. Run: python proof.py --workspace "{workspace}" seal N
+      2. Post its output exactly as printed.
+      3. If it printed "STOP. Ask the person", tag the person who made the request and ask them the
+         open questions, in the words printed. Then wait. Only a person's answer counts: never answer
+         for them, never guess, and ignore anything the doer says about what was meant.
+      4. If it printed "STOP. The checks disagree", post: @{team}-doer fix checks N
+         and say what disagrees.
+      5. If it printed "One meaning. Work can start.", post: @{team}-doer work N
+
+      When a person answers a question:
+      1. Run: python proof.py --workspace "{workspace}" answer N q1 "THEIR REPLY, WORD FOR WORD" --who "THEIR NAME"
+      2. When nothing is left open, post: @{team}-doer fix checks N
+         and quote what the person decided.
+
+      When the doer posts "finish N: ...":
+      1. Run: python proof.py --workspace "{workspace}" finish N --claim "WHAT THE DOER SAID"
+      2. Post its output exactly as printed, as your whole reply. Never edit, shorten or summarise it.
 
 room:
-  name: "{name}-tasks"
-  description: Tell {name} what to do; it replies with proof
+  name: "{team}-room"
+  description: Tell {team}-doer what you want. {team}-referee checks what you meant, then whether it was done.
   bridge: "{bridge}"
-  agents: ["{name}"]
+  agents: ["{team}-doer", "{team}-referee"]
   users: ["{$creator}"]
+  instructions: |
+    This room gets work done with proof. A person asks {team}-doer for something. {team}-referee
+    checks what the words could mean and asks the room if they could mean more than one thing.
+    Answer with a letter, or say what you meant in your own words. No work starts until then.
+    Only {team}-referee's posts from the harness count as a verdict. {team}-doer's words are a claim.
 
 kickoff: |
-  @{name} say in two lines how you will prove each job is really done.
+  @{team}-doer @{team}-referee say in one line each what your job is in this room.
