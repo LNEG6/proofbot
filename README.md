@@ -140,6 +140,14 @@ These are real runs with Claude Code. The check in the first four rows was writt
 
 One whole job, with the agent also doing the work, asked two questions, built the right thing, and ended DONE, READ THE WARNINGS because the test project had no test suite. It took about 13 minutes. That's a handful of requests, not a benchmark, and the AI steps don't give the same answer every time.
 
+### Does a decision hold up?
+
+We tested this on six new business rules, with nothing hand-written. The real agent wrote every check and did the work, an AI that knew only the rule stood in for its owner, and a second request then went against that rule.
+
+**None of the six ended DONE.** In three, the job stopped before any work and named the clash. The other three ended UNPROVEN with questions still open.
+
+It isn't smooth yet. Only two of the six first jobs finished DONE, because the harness is strict and agents don't always list their inputs, and each took between 2 and 19 minutes.
+
 ### Why not just tell the agent to ask?
 
 You should. Told only "if anything is unclear, ask", Claude Code asked good questions on the three ambiguous requests above and said PROCEED on the other four, in seconds. Left alone, it picked a meaning silently on all three. So spotting ambiguity is the cheap part, and our readers are much slower than that one line.
