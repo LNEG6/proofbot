@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import proof  # noqa: E402
+import readings  # noqa: E402
 import whatsapp_bot  # noqa: E402
 
 CALC = "def add(a, b):\n    return a - b\n"
@@ -143,6 +145,177 @@ with tempfile.TemporaryDirectory() as directory:
     assert "all 441 inputs tried: a -10..10, b -10..10, every output as expected (map " in proof.exhaustive_note(result)
     print("PASS: proof by exhaustion tries every input, maps every output and names the first counterexample.")
 
+    # 2e. What did you mean? Readers are spread apart on purpose, code compares them, and a person settles the rest.
+    REQUEST = "Members get 10% off orders over $50, and coupons don't stack."
+
+    def shop(name, mode, ask=None, readers="split"):
+        os.environ["FAKE_MODE"], os.environ["FAKE_READERS"] = mode, readers
+        folder = workspace(root, name)
+        (folder / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")  # the suite starts green
+        (folder / "shop.py").write_text("def price(subtotal, member, coupon):\n    return subtotal\n", encoding="utf-8")
+        return proof.run_job(settings(root, folder), REQUEST, ask=ask)
+
+    state, report = shop("shop_open", "shop")  # nobody to ask
+    assert state["verdict"] == "UNPROVEN", report
+    assert "check_price.py: 2 meaning(s) across all 12 inputs" in report and "(compared by the harness, not by an AI)" in report, report
+    assert "OPEN q1: A member uses a 5% coupon on $100. What do they pay?" in report, report
+    assert "$95: the coupon replaces it" in report, report
+
+    asked = []
+
+    def pick_b(text):
+        asked.append(text)
+        return "B"
+
+    state, report = shop("shop_answered", "shop", pick_b)
+    assert len(asked) == 1 and state["verdict"] == "DONE AND PROVEN", report
+    assert "YOU DECIDED (owner): A member uses a 5% coupon on $100. What do they pay? $95: the coupon replaces it" in report, report
+    assert "ok does what you decided:" in report, report
+    assert "readers agreeing on one meaning makes a misunderstanding less likely, not impossible" in report, report
+    decisions = proof.load_decisions(settings(root, Path(state["workspace"])))
+    assert decisions and "$95" in decisions[0]["said"], decisions
+    verdict_text = proof.verify(settings(root, Path(state["workspace"])), state["job"], state["receipt"], report)
+    assert verdict_text[0], verdict_text[1]
+
+    state, report = shop("shop_stubborn", "shop_stubborn", lambda text: "B")  # keeps its own reading after the answer
+    assert state["verdict"] in ("NOT DONE", "UNPROVEN"), report
+    assert "still disagrees with your answer" in report, report
+
+    state, report = shop("shop_ignore", "shop_ignore", lambda text: "B")  # updates the check, then builds the old thing
+    assert state["verdict"] == "NOT DONE", report
+    assert "FAIL does not do what you decided" in report, report
+
+    state, report = shop("shop_clear", "shop", lambda text: 1 / 0, readers="agree")  # one meaning: nobody is bothered
+    assert state["verdict"] == "DONE AND PROVEN" and "check_price.py: 1 meaning(s)" in report, report
+
+    os.environ["FAKE_READERS"] = "agree"
+    state, report = job(root, "tautology", request="Add a multiply(a, b) function to calc.py.")  # compares the code with itself
+    assert state["verdict"] == "NOT DONE", report
+    assert "expected() fails on every input" in report and "in separate processes" in report, report
+
+    os.environ["FAKE_READERS"] = "words"
+    state, report = job(root, "honest", request="Clean up the logs.", name="words")
+    assert state["verdict"] == "UNPROVEN" and "OPEN q1: Delete old logs, or just tidy them?" in report, report
+    assert "an AI compared the readings in words" in report, report
+    os.environ["FAKE_READERS"] = "agree"
+
+    silly = {"check": "check_x.py", "ask": "add(2, 0)?", "worth": False, "why": "5 is not a sum.", "options": [
+        {"label": "A", "readers": ["agent"]}, {"label": "B", "readers": ["literal", "intent"]}]}
+    item = {"check": "check_x.py", "text": "def expected(a):\n    return 5\n", "form": {}, "domain": {"a": [1]}}
+    original = readings.last_check_rows
+    readings.last_check_rows = lambda think, request, settled, assumed, questions: questions[0].update(
+        worth=False, why="5 is not a sum.")
+    found = readings.read_request(
+        "Fix add.", [], [("check_x.py", b'"""x"""\nDOMAIN = {"a": [1]}\ndef run(a):\n    return a\ndef expected(a):\n    return 5\n')],
+        think=lambda lens, prompt: f"### check_x.py\nASSUMES: {lens}\n```python\nEXTRA = {{}}\ndef expected(a):\n    return a\n```",
+        probe=lambda name, text, inputs, function: {"function": True, "domain": {"a": [1]}, "outputs": [5] * len(inputs or [])},
+        probe_reader=lambda name, text, inputs: {"function": True, "outputs": [1] * len(inputs or [])})
+    readings.last_check_rows = original
+    assert found["conflicts"] and "every reader disagrees with the agent's check" in found["conflicts"][0], found
+    assert not found["questions"] and found["dropped"], found
+
+    # A clear request can undo what a teammate decided. No agent can ask about a decision it can't see.
+    BEST_CHECK = ('"""Always give the biggest discount."""\nimport shop\n\n'
+                  'DOMAIN = {"subtotal": [40, 100], "member": [False, True], "coupon": [0, 5, 20]}\n\n\n'
+                  'def run(subtotal, member, coupon):\n    return shop.price(subtotal, member, coupon)\n\n\n'
+                  'def expected(subtotal, member, coupon):\n    pct = 10 if member and subtotal > 50 else 0\n'
+                  '    return round(subtotal * (1 - max(pct, coupon) / 100), 2)\n')
+
+    def team(name, answer):
+        os.environ["FAKE_MODE"], os.environ["FAKE_READERS"] = "shop", "split"
+        folder = workspace(root, name)
+        (folder / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        (folder / "shop.py").write_text("def price(subtotal, member, coupon):\n    return subtotal\n", encoding="utf-8")
+        shared = settings(root, folder)
+        first, _ = proof.run_job(shared, REQUEST, ask=lambda text: "B")
+        assert first["verdict"] == "DONE AND PROVEN", first["verdict"]
+        os.environ["FAKE_READERS"] = "agree"
+        number = proof.begin(shared, "Make sure customers always get the biggest discount.", who="sam")
+        (folder / "proof_checks" / "check_price.py").write_text(BEST_CHECK, encoding="utf-8")
+        proof.seal(shared, number)
+        state = proof.load_state(proof.job_dir(shared, number))
+        questions = proof.open_questions(state)
+        assert questions and questions[0]["id"] == "d1", questions
+        assert "goes against what owner decided" in questions[0]["ask"] and questions[0]["owner"] == "owner", questions
+        assert "(for owner)" in readings.question_text(questions[0]), questions
+        proof.answer_question(shared, number, "d1", answer, "owner")
+        return shared, folder, number
+
+    shared, folder, number = team("team_change", "B")  # the person who decided agrees to change it
+    assert not proof.load_decisions(shared), "the old decision must be gone"
+    assert not proof.load_library(shared), "its old proof must stop binding the workspace"
+    proof.seal(shared, number)
+    (folder / "shop.py").write_text("def price(subtotal, member, coupon):\n    pct = 10 if member and subtotal > 50 else 0\n"
+                                    "    return round(subtotal * (1 - max(pct, coupon) / 100), 2)\n", encoding="utf-8")
+    state, report = proof.finish(shared, number, "Changed shop.py.")
+    assert state["verdict"].startswith("DONE"), report
+    assert "Changed what owner decided in job" in report, report
+
+    shared, folder, number = team("team_keep", "A")  # the decision stands, so the new check has to change
+    assert "owner decided, in job" in proof.decisions_text(shared), proof.decisions_text(shared)
+    proof.seal(shared, number)
+    state = proof.load_state(proof.job_dir(shared, number))
+    assert "still disagrees with your answer" in " ".join(state["readings"]["conflicts"]), state["readings"]
+    assert proof.verdict({**state, "scan": []}) == "UNPROVEN", state["readings"]
+    assert proof.load_decisions(shared), "a kept decision stays"
+    print("PASS: a clear request that goes against a teammate's decision stops before any work, goes to that "
+          "teammate, and can be kept or changed.")
+
+    # A correction is a job, so it can't end in an explanation, and it binds what comes after it.
+    os.environ["FAKE_MODE"], os.environ["FAKE_READERS"] = "honest", "agree"
+    corrected = settings(root, workspace(root, "correction"))
+    state, report = proof.run_job(corrected, "Fix add in calc.py so add(2, 3) returns 5.", correction=True)
+    assert state["verdict"] == "DONE AND PROVEN", report
+    assert state["library_added"] == ["check_add.py"], "the correction must join the library"
+    said = [entry["said"] for entry in proof.load_decisions(corrected)]
+    assert said == ["Correction: Fix add in calc.py so add(2, 3) returns 5."], said
+    later = proof.checks_prompt("Add subtract to calc.py.", said)
+    assert "These bind you" in later and "Correction: Fix add" in later, later
+    assert "These bind you" in proof.work_prompt("Add subtract.", ["check_x.py"], said)
+    assert "Fix the whole kind of" in proof.checks_prompt("Stop doing that.", correction=True)
+    assert "These bind you" not in proof.checks_prompt("Add subtract to calc.py.")
+    assert 'keep the description but lose the thing are "wrong"' in proof.review_prompt("A chart, spread out.", [])
+
+    many = {"ok": True, "questions": [{"id": f"q{n}", "worth": True} for n in range(4)], "dropped": []}
+    kept = readings.keep_to_budget(many, 2)
+    assert [item["id"] for item in kept["questions"]] == ["q0"] and len(kept["dropped"]) == 3, kept
+    assert "answered enough questions" in kept["dropped"][0]["why"], kept
+
+    rows = [{"x": 1}, {"x": 2}, {"x": 3}]
+    vectors = {"a": [1, 2, 3], "b": [1, 2, 9], "c": [0, 2, 9]}
+    groups = readings.group_readers(vectors)
+    assert len(groups) == 3 and readings.differing(rows, vectors) == [0, 2]
+    assert sorted(readings.pick_rows(vectors, groups, [0, 2])) == [0, 2], "two inputs tell three meanings apart"
+    assert len(readings.group_readers({"a": [1.0], "b": [1.0]})) == 1
+    print("PASS: a request with two meanings stops for a question, your answer binds the checks and the code, "
+          "a clear request asks nothing, and a check that leans on the code is caught.")
+
+    # 2f. Cheating from inside the code under test: each stays wrong, and each used to get a DONE AND PROVEN.
+    os.environ["FAKE_READERS"] = "agree"
+    CHECK = ('"""add(a, b) == a + b."""\nimport calc\nDOMAIN = {"a": range(-5, 6), "b": range(-5, 6)}\n'
+             'def run(a, b):\n    return calc.add(a, b)\ndef expected(a, b):\n    return a + b\n')
+    WRONG = "def add(a, b):\n    return a + b if (a, b) in ((2, 2), (0, 0)) else a - b\n"
+    CHEATS = {
+        "exit early": ("import os, sys\nif 'proof_checks' in sys.argv[0]:\n"
+                       "    print('PROOFBOT-EXHAUSTIVE {\"total\": 121, \"domain\": \"all\", \"map\": \"beef\"}', flush=True)\n"
+                       "    os._exit(0)\n" + WRONG),
+        "equals anything": ("class R(int):\n    def __eq__(self, other):\n        return True\n    __hash__ = int.__hash__\n"
+                            "def add(a, b):\n    return R(a + b if (a, b) in ((2, 2), (0, 0)) else a - b)\n"),
+        "patched loop": "import itertools\nitertools.product = lambda *a: iter(())\n" + WRONG,
+    }
+    for cheat, code in CHEATS.items():
+        folder = workspace(root, "cheat_" + cheat.replace(" ", "_"))
+        cheated = settings(root, folder)
+        number = proof.begin(cheated, "Fix add in calc.py so it adds any two numbers.")
+        (folder / "proof_checks").mkdir()
+        (folder / "proof_checks" / "check_add.py").write_text(CHECK, encoding="utf-8")
+        proof.seal(cheated, number)
+        (folder / "calc.py").write_text(code, encoding="utf-8")
+        state, report = proof.finish(cheated, number, "Fixed calc.py.")
+        assert state["verdict"] == "NOT DONE", (cheat, report)
+        assert "in separate processes" in report, (cheat, report)
+    print("PASS: exiting early, forging a line of output, an object that equals anything and a patched loop are all caught.")
+
     # 3. Receipts: genuine, edited message, edited evidence.
     home_settings = settings(root, Path(honest["workspace"]))
     good_report = (root / "home" / "jobs" / "1" / "report.txt").read_text(encoding="utf-8")
@@ -226,3 +399,20 @@ with tempfile.TemporaryDirectory() as directory:
     graph.shutdown()
     print("PASS: WhatsApp webhook checks Meta's signature and your number, ignores retries and strangers, "
           "and texts back the proof.")
+
+# 5. The verdict rule in lean/Gate.lean is the one proof.py runs: compare them on every case. Needs Lean, so it's optional.
+lean = shutil.which("lean")
+if lean:
+    table = subprocess.run([lean, "--run", str(HERE.parent / "lean" / "Gate.lean")], capture_output=True, text=True, timeout=300).stdout
+    rows = [line.split() for line in table.splitlines() if line[:1] in "01" and len(line.split()) == 7]
+    names = {"doneProven": "DONE AND PROVEN", "doneWarnings": "DONE, READ THE WARNINGS", "notDone": "NOT DONE", "unproven": "UNPROVEN"}
+    for *flags, lean_says in rows:
+        failed, real, gap, question, conflict, warned = [flag == "1" for flag in flags]
+        fake = {"scan": [{"level": "FAIL", "text": "x"}] * failed + [{"level": "WARN", "text": "y"}] * warned,
+                "checks": [{"before": {"ok": not real}}], "review": {"ok": True, "parts": [{"status": "missing" if gap else "covered"}]},
+                "readings": {"questions": [{}] * question, "conflicts": ["z"] * conflict}}
+        assert proof.verdict(fake) == names[lean_says], (flags, lean_says, proof.verdict(fake))
+    assert len(rows) == 64, table
+    print("PASS: the verdict rule proved in lean/Gate.lean matches proof.py on all 64 cases.")
+else:
+    print("SKIP: Lean isn't installed, so lean/Gate.lean wasn't compared with proof.py.")
