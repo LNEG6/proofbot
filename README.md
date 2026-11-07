@@ -120,7 +120,7 @@ When inputs can't be listed, like "clean up the logs", readers answer in words a
 
 This is the part a prompt can't do.
 
-Each answer is saved with who gave it. Before any new work starts, the harness runs every earlier decision against the new checks. A request that goes against one stops, and the person who decided gets asked. They can keep their decision, or change it, which retires the old proof. Later questions on the same inputs go to the same person.
+Each answer is saved the moment it's given, with who gave it. Before any new work starts, the harness runs every earlier decision and every proven check against the new checks, so it catches a rule whether it was settled by a letter, in someone's own words, or never asked about at all. A request that goes against one stops, and the person who decided gets asked. They can keep their decision, or change it, which retires the old proof. Later questions on the same inputs go to the same person.
 
 Decisions and proven checks bind every later job, in any session, with any agent. A correction works the same way: `begin --correction` starts a job whose check must fail on the old behaviour, so it can't end in an apology.
 
@@ -228,7 +228,7 @@ A report opens with one of **DONE AND PROVEN**, **DONE, READ THE WARNINGS**, **N
 - **On one computer, the folders aren't a wall.** An agent that can write to the proofbot folder could forge job files that `verify` accepts, because receipts aren't signed. Proofbot blocks this when run directly: with Claude Code the agent gets file tools limited to the workspace, and Codex has its sandbox. Inside a Switch room, check how your agent is confined.
 - **Code can still tell it's being tested.** Code that detects the harness and behaves differently would pass. THIS PROOF RELIES ON says so. Checks without a DOMAIN run in one process with the code, and the report names them.
 - **With Claude Code, checks run as you.** The sandbox comes from Codex, so AI-written checks run with your full access unless you use `AGENT=codex`.
-- A contradiction is only found before the work when the new check takes the same inputs as the earlier decision. Otherwise the proven library catches it at the end, as NOT DONE.
+- A clash is only found before the work when the new check takes the same inputs as the earlier one. Otherwise the proven library catches it at the end, as NOT DONE.
 - To change a requirement that came from a decision, answer B to the contradiction. For any other proven check, delete its file in `home/library/` and its line in `library.json`.
 - The harness snapshots the workspace with git and runs `git init` if the folder has none. It never commits or changes your branch.
 - Jobs run one at a time. A task that is a question, not a change, comes back UNPROVEN, because there's nothing to check.

@@ -681,11 +681,52 @@ def find_contradictions(settings, state, sealed):
                 continue
             who = decision.get("who") or "someone"
             found.append({
-                "id": f"d{len(found) + 1}", "check": name, "inputs": inputs, "worth": True, "owner": decision.get("who", ""),
+                "id": f"d{len(found) + 1}", "job": decision["job"], "check": name, "inputs": inputs, "worth": True, "owner": decision.get("who", ""),
                 "ask": f"This goes against what {who} decided in job {decision['job']}: \"{decision['said']}\" Keep that, or change it?",
                 "options": [{"label": "A", "says": f"Keep what {who} decided", "output": decision["output"], "readers": []},
                             {"label": "B", "says": "Change it. The new request wins", "output": now, "readers": [],
                              "retires": decision["job"]}]})
+            break
+    return found
+
+
+def proven_clashes(settings, job, state, sealed, found):
+    """Run every proven check against the new checks, before the work. This catches a rule however it was settled,
+    in someone's own words or never asked at all. A difference here would fail at the end anyway, so it's never a
+    false alarm: it just saves the work."""
+    isolated = job / "recheck"
+    isolated.mkdir(exist_ok=True)
+    answered = {readings.key(entry["inputs"]) for entry in state.get("answers") or [] if entry.get("inputs")}
+    jobs = {question["job"] for question in found}
+    for entry in load_library(settings):
+        if len(found) >= 2 or entry["job"] == state["job"] or entry["job"] in jobs:
+            continue
+        old = (library_dir(settings) / entry["file"]).read_bytes().decode("utf-8", "replace").lstrip("\ufeff")
+        form = readings.shape(old)
+        info = probe_check(settings, old, entry["name"], None, isolated=isolated) if form else None
+        if not info or not info.get("domain"):
+            continue
+        rows, _ = readings.make_rows(info["domain"], entry["name"])
+        before = probe_check(settings, old, entry["name"], rows, isolated=isolated)
+        for name, source in sealed:
+            text = source.decode("utf-8", "replace").lstrip("\ufeff")
+            new = readings.shape(text)
+            if not before or new is None or new["params"] != form["params"]:
+                continue
+            after = probe_check(settings, text, name, rows, isolated=isolated)
+            if not after or len(after["outputs"]) != len(rows):
+                continue
+            clash = next((i for i, (a, b) in enumerate(zip(before["outputs"], after["outputs"]))
+                          if readings.key(a) != readings.key(b) and b != {"raises": True} and readings.key(rows[i]) not in answered), None)
+            if clash is None:
+                continue
+            who = entry.get("decided_by") or "an earlier job"
+            found.append({"id": f"d{len(found) + 1}", "job": entry["job"], "check": name, "inputs": rows[clash], "worth": True,
+                          "owner": (entry.get("decided_by") or "").split(",")[0],
+                          "ask": f"This goes against what {who} settled in job {entry['job']}: \"{entry['says'][:140]}\" Keep that, or change it?",
+                          "options": [{"label": "A", "says": f"Keep what job {entry['job']} proved", "output": before["outputs"][clash], "readers": []},
+                                      {"label": "B", "says": "Change it. The new request wins", "output": after["outputs"][clash], "readers": [],
+                                       "drops": entry["file"]}]})
             break
     return found
 
@@ -722,6 +763,9 @@ def answer_question(settings, number, question_id, reply, who="", confirmed=None
                        and item.get("inputs") == question["inputs"])
         retire(settings, pick["retires"], decided.get("check"), question["inputs"])
         entry["said"] = f"Changed what {decided.get('who') or 'someone'} decided in job {pick['retires']}: {question['inputs']} now gives {pick['output']!r}."
+    if pick and "drops" in pick:
+        kept = [item for item in load_library(settings) if item["file"] != pick["drops"]]
+        (library_dir(settings) / "library.json").write_text(json.dumps(kept, indent=2), encoding="utf-8")
     state.setdefault("answers", []).append(entry)
     state["readings"]["questions"] = [item for item in open_questions(state) if item["id"] != question_id]
     save_state(job, state)
@@ -855,8 +899,8 @@ def add_to_library(settings, state, job):
             continue
         file = f"job{state['job']}_{check['name']}"
         (folder / file).write_bytes((job / "sealed" / check["name"]).read_bytes())
-        decided = sorted({entry["who"] for entry in state.get("answers") or []
-                          if entry.get("who") and entry.get("check") == check["name"]})
+        decided = sorted({entry["who"] for entry in state.get("answers") or [] if entry.get("who")}) or \
+            ([state["who"]] if state.get("who") else [])
         entries.append({"file": file, "name": check["name"], "says": check["says"], "job": state["job"],
                         "sha256": check["sha256"], "decided_by": ", ".join(decided)})
         added.append(check["name"])
@@ -968,7 +1012,7 @@ def seal(settings, number):
                  review=review_checks(settings, job, state["request"], sealed))
     state["readings"] = read_meaning(settings, job, state, sealed)
     state["asked_at"] = int(time.time() * 1000) - 5000  # only answers given after this count
-    against = find_contradictions(settings, state, sealed)
+    against = proven_clashes(settings, job, state, sealed, find_contradictions(settings, state, sealed))
     if against:
         state["readings"] = state["readings"] or {"ok": True, "mode": "compared", "statements": [], "conflicts": [],
                                                   "failed": [], "dropped": [], "questions": []}

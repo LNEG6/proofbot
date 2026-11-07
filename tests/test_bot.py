@@ -263,6 +263,25 @@ with tempfile.TemporaryDirectory() as directory:
     print("PASS: a clear request that goes against a teammate's decision stops before any work, goes to that "
           "teammate, and can be kept or changed.")
 
+    # A proven rule stops a clash before the work even if nobody was ever asked, or the answer was in plain words.
+    os.environ["FAKE_MODE"], os.environ["FAKE_READERS"] = "shop", "agree"
+    folder = workspace(root, "proven_clash")
+    (folder / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (folder / "shop.py").write_text("def price(subtotal, member, coupon):\n    return subtotal\n", encoding="utf-8")
+    shared = settings(root, folder)
+    first, _ = proof.run_job(shared, REQUEST)
+    assert first["verdict"] == "DONE AND PROVEN" and not proof.load_decisions(shared), first["verdict"]
+    number = proof.begin(shared, "A coupon should replace the member discount.", who="sam")
+    (folder / "proof_checks" / "check_price.py").write_text(BEST_CHECK.replace(
+        "pct = 10 if member and subtotal > 50 else 0\n    return round(subtotal * (1 - max(pct, coupon) / 100), 2)\n",
+        "pct = coupon if coupon else (10 if member and subtotal > 50 else 0)\n    return round(subtotal * (1 - pct / 100), 2)\n"), encoding="utf-8")
+    proof.seal(shared, number)
+    questions = proof.open_questions(proof.load_state(proof.job_dir(shared, number)))
+    assert questions and questions[0]["id"] == "d1" and "goes against what an earlier job settled" in questions[0]["ask"], questions
+    proof.answer_question(shared, number, "d1", "B", "kim")
+    assert not proof.load_library(shared), "changing the rule retires its old proof"
+    print("PASS: a proven rule stops a clashing request before the work, even if nobody was ever asked about it.")
+
     # A correction is a job, so it can't end in an explanation, and it binds what comes after it.
     os.environ["FAKE_MODE"], os.environ["FAKE_READERS"] = "honest", "agree"
     corrected = settings(root, workspace(root, "correction"))
