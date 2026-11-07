@@ -7,8 +7,8 @@ import wave
 
 import numpy as np
 
-RATE, LENGTH = 44100, 60.0
-CUTS = [6.9, 10.3, 15.6, 28.2, 34.2, 46.0, 52.0, 55.3]   # scene changes in index.html
+RATE, LENGTH = 44100, 65.5
+CUTS = [6.9, 10.3, 15.6, 28.2, 34.2, 46.0, 51.5, 57.5, 60.8]   # scene changes in index.html
 DROP = 24.1                                               # the wrong paths die
 BAR = 4.8
 CHORDS = [(110.0, 164.81, 220.0, 261.63), (87.31, 130.81, 174.61, 261.63),

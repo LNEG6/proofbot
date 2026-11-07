@@ -31,7 +31,8 @@ async function open() {
     const total = Math.round(duration * FPS);
     const args = ["-y", "-hide_banner", "-loglevel", "error", "-f", "image2pipe", "-framerate", String(FPS), "-c:v", "mjpeg", "-i", "-"];
     if (audio) args.push("-i", audio, "-c:a", "aac", "-b:a", "192k", "-shortest");
-    args.push("-c:v", "libx264", "-preset", "medium", "-crf", "17", "-pix_fmt", "yuv420p", "-movflags", "+faststart", file);
+    args.push("-vf", "scale=in_range=pc:out_range=tv,format=yuv420p", "-c:v", "libx264", "-preset", "medium", "-crf", "17",
+              "-color_range", "tv", "-movflags", "+faststart", file);
     const ff = spawn(process.env.FFMPEG || "ffmpeg", args, { stdio: ["pipe", "inherit", "inherit"] });
     const started = Date.now();
     for (let frame = 0; frame < total; frame++) {

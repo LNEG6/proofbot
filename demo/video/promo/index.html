@@ -106,6 +106,20 @@ canvas{position:absolute;left:0;top:0}
   <div class="cap" id="wc2" style="top:838px">It asks the person who decided.</div>
 </section>
 
+<section class="s" id="real">
+  <div class="card" id="rrc" style="left:150px;top:120px;width:1620px;height:620px;background:#050507"><div class="glow"></div>
+    <div class="mono" style="padding:26px 44px 18px;font-size:24px;color:#77777c;border-bottom:1.5px solid var(--line)">proof.py &nbsp;·&nbsp; job 2 &nbsp;·&nbsp; Claude Code readers</div>
+    <div class="mono" style="padding:30px 44px;font-size:29px;line-height:1.5;color:#b4b4b8">
+      <div id="rl1" style="opacity:0">WHAT DID YOU MEAN?</div>
+      <div id="rl2" style="opacity:0">check_cleanup.py: 3 meaning(s) across all 16 inputs, 8 input(s) differ</div>
+      <div id="rl3" style="opacity:0;margin-top:24px;color:var(--amber)">OPEN d1 (for kim): This goes against what kim decided in job 1: "Someone who doesn't pay hasn't used the product for exactly one year. What should happen to their account? Turn the account off, but keep it so it can be turned back on later" Keep that, or change it?</div>
+      <div id="rl4" style="opacity:0;margin-top:24px;color:#e4e4e2">&nbsp;&nbsp;A: Keep what kim decided</div>
+      <div id="rl5" style="opacity:0;color:#e4e4e2">&nbsp;&nbsp;B: Change it. The new request wins</div>
+    </div>
+  </div>
+  <div class="cap" id="rrcap" style="top:808px">Real output, from a real run.</div>
+</section>
+
 <section class="s" id="room">
   <div class="a" id="r1" style="left:110px;top:300px;font-size:92px;font-weight:500;line-height:1.06;opacity:0">It all runs in<br>your team chat.</div>
   <div class="a" id="r2" style="left:110px;top:540px;font-size:46px;line-height:1.3;color:#d0d0cd;opacity:0">Your team just chats.<br><span style="color:#77777c">The agent never marks its own homework.</span></div>
@@ -195,11 +209,12 @@ const SC=[
      el.style.opacity=o});$('fa2').style.borderColor=t>6.7?'#3aa8ff':'#2c2c32';$('fa2').style.boxShadow=t>6.7?'0 0 26px rgba(58,168,255,.5)':'none';rev($('fm'),t,9.4);rev($('fc2'),t,8.5)}},
  {id:'dec',a:28.2,b:34.2,f(t){$('dc').style.transform=`scale(${1+t*.009})`;rev($('dk'),t,.5);rev($('dc1'),t,.6,.5,3);rev($('dd'),t,3);rev($('dc2'),t,3.2)}},
  {id:'week',a:34.2,b:46,f(t){rev($('w0'),t,.1,.5,1.5);rev($('wc'),t,1.9);rev($('wl'),t,3);rev($('wc1'),t,4.2,.5,7);rev($('wr'),t,6.2);rev($('wc2'),t,7.3);$('wk').style.borderColor=t>9.4?'#ffb340':'#2c2c32'}},
- {id:'room',a:46,b:52,f(t){rev($('r1'),t,.2);rev($('r2'),t,1.5);rev($('rc'),t,.6)}},
- {id:'tag',a:52,b:55.3,f(t){rev($('t1'),t,.2,.6);$('t2').style.opacity=eo(P(t,.6,1.1));$('t2').style.transform=`scaleX(${eo(P(t,.6,1.3))})`}},
- {id:'end',a:55.3,b:60,f(t){rev($('e1'),t,.1,.6);rev($('e2'),t,.5);rev($('e3'),t,.85);rev($('e4'),t,1.2);rev($('e5'),t,1.5)}},
+ {id:'real',a:46,b:51.5,f(t){$('rrc').style.transform=`scale(${1+t*.006})`;['rl1','rl2','rl3','rl4','rl5'].forEach((id,i)=>rev($(id),t,.25+[0,.3,.8,1.7,1.9][i],.35,null,{y:10,blur:6}));rev($('rrcap'),t,2.2)}},
+ {id:'room',a:51.5,b:57.5,f(t){rev($('r1'),t,.2);rev($('r2'),t,1.5);rev($('rc'),t,.6)}},
+ {id:'tag',a:57.5,b:60.8,f(t){rev($('t1'),t,.2,.6);$('t2').style.opacity=eo(P(t,.6,1.1));$('t2').style.transform=`scaleX(${eo(P(t,.6,1.3))})`}},
+ {id:'end',a:60.8,b:65.5,f(t){rev($('e1'),t,.1,.6);rev($('e2'),t,.5);rev($('e3'),t,.85);rev($('e4'),t,1.2);rev($('e5'),t,1.5)}},
 ];
-window.DURATION=60;
+window.DURATION=65.5;
 window.seek=function(T){ let active=null; for(const s of SC){const on=T>=s.a&&T<s.b; const el=$(s.id); el.style.display=on?'block':'none'; if(on) active=s;}
   if(!active) return; const lt=T-active.a, el=$(active.id); const outP=P(T,active.b-.3,active.b); el.style.opacity=1-outP; el.style.filter=outP>0?`blur(${outP*18}px)`:'none'; active.f(lt); };
 window.chartStill=function(){ };
