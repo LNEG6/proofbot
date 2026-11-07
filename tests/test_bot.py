@@ -214,6 +214,52 @@ with tempfile.TemporaryDirectory() as directory:
     assert found["conflicts"] and "every reader disagrees with the agent's check" in found["conflicts"][0], found
     assert not found["questions"] and found["dropped"], found
 
+    # A clear request can undo what a teammate decided. No agent can ask about a decision it can't see.
+    BEST_CHECK = ('"""Always give the biggest discount."""\nimport shop\n\n'
+                  'DOMAIN = {"subtotal": [40, 100], "member": [False, True], "coupon": [0, 5, 20]}\n\n\n'
+                  'def run(subtotal, member, coupon):\n    return shop.price(subtotal, member, coupon)\n\n\n'
+                  'def expected(subtotal, member, coupon):\n    pct = 10 if member and subtotal > 50 else 0\n'
+                  '    return round(subtotal * (1 - max(pct, coupon) / 100), 2)\n')
+
+    def team(name, answer):
+        os.environ["FAKE_MODE"], os.environ["FAKE_READERS"] = "shop", "split"
+        folder = workspace(root, name)
+        (folder / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        (folder / "shop.py").write_text("def price(subtotal, member, coupon):\n    return subtotal\n", encoding="utf-8")
+        shared = settings(root, folder)
+        first, _ = proof.run_job(shared, REQUEST, ask=lambda text: "B")
+        assert first["verdict"] == "DONE AND PROVEN", first["verdict"]
+        os.environ["FAKE_READERS"] = "agree"
+        number = proof.begin(shared, "Make sure customers always get the biggest discount.", who="sam")
+        (folder / "proof_checks" / "check_price.py").write_text(BEST_CHECK, encoding="utf-8")
+        proof.seal(shared, number)
+        state = proof.load_state(proof.job_dir(shared, number))
+        questions = proof.open_questions(state)
+        assert questions and questions[0]["id"] == "d1", questions
+        assert "goes against what owner decided" in questions[0]["ask"] and questions[0]["owner"] == "owner", questions
+        assert "(for owner)" in readings.question_text(questions[0]), questions
+        proof.answer_question(shared, number, "d1", answer, "owner")
+        return shared, folder, number
+
+    shared, folder, number = team("team_change", "B")  # the person who decided agrees to change it
+    assert not proof.load_decisions(shared), "the old decision must be gone"
+    assert not proof.load_library(shared), "its old proof must stop binding the workspace"
+    proof.seal(shared, number)
+    (folder / "shop.py").write_text("def price(subtotal, member, coupon):\n    pct = 10 if member and subtotal > 50 else 0\n"
+                                    "    return round(subtotal * (1 - max(pct, coupon) / 100), 2)\n", encoding="utf-8")
+    state, report = proof.finish(shared, number, "Changed shop.py.")
+    assert state["verdict"].startswith("DONE"), report
+    assert "Changed what owner decided in job" in report, report
+
+    shared, folder, number = team("team_keep", "A")  # the decision stands, so the new check has to change
+    proof.seal(shared, number)
+    state = proof.load_state(proof.job_dir(shared, number))
+    assert "still disagrees with your answer" in " ".join(state["readings"]["conflicts"]), state["readings"]
+    assert proof.verdict({**state, "scan": []}) == "UNPROVEN", state["readings"]
+    assert proof.load_decisions(shared), "a kept decision stays"
+    print("PASS: a clear request that goes against a teammate's decision stops before any work, goes to that "
+          "teammate, and can be kept or changed.")
+
     # A correction is a job, so it can't end in an explanation, and it binds what comes after it.
     os.environ["FAKE_MODE"], os.environ["FAKE_READERS"] = "honest", "agree"
     corrected = settings(root, workspace(root, "correction"))

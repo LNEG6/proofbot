@@ -634,6 +634,54 @@ def open_questions(state):
     return (state.get("readings") or {}).get("questions", [])
 
 
+def owner_of(settings, params):
+    """Who settled this before? Questions go to the person who knows, not to whoever happened to type the request."""
+    for decision in reversed(load_decisions(settings)):
+        if decision.get("who") and set(decision.get("inputs") or {}) == set(params):
+            return decision["who"]
+    return ""
+
+
+def find_contradictions(settings, state, sealed):
+    """A clear request can still undo what a teammate decided, and no agent can ask about a decision it can't see.
+
+    So every earlier decision is run against the new checks, by the harness, before any work starts."""
+    found = []
+    answered = {readings.key(entry["inputs"]) for entry in state.get("answers") or [] if entry.get("inputs")}
+    for decision in load_decisions(settings):
+        inputs = decision.get("inputs")
+        if "output" not in decision or readings.key(inputs) in answered:
+            continue
+        for name, source in sealed:
+            text = source.decode("utf-8", "replace").lstrip("\ufeff")
+            form = readings.shape(text)
+            if form is None or form["params"] != sorted(inputs):
+                continue
+            result = probe_check(settings, text, name, [inputs], "expected")
+            now = result["outputs"][0] if result and result.get("outputs") else {"raises": True}
+            if now == {"raises": True} or readings.key(now) == readings.key(decision["output"]):
+                continue
+            who = decision.get("who") or "someone"
+            found.append({
+                "id": f"d{len(found) + 1}", "check": name, "inputs": inputs, "worth": True, "owner": decision.get("who", ""),
+                "ask": f"This goes against what {who} decided in job {decision['job']}: \"{decision['said']}\" Keep that, or change it?",
+                "options": [{"label": "A", "says": f"Keep what {who} decided", "output": decision["output"], "readers": []},
+                            {"label": "B", "says": "Change it. The new request wins", "output": now, "readers": [],
+                             "retires": decision["job"]}]})
+            break
+    return found
+
+
+def retire(settings, job_number, check, inputs):
+    """A person chose to change an earlier decision, so its old proof stops binding this workspace."""
+    path = decisions_path(settings)
+    decisions = [entry for entry in load_decisions(settings)
+                 if not (entry["job"] == job_number and entry.get("inputs") == inputs)]
+    path.write_text(json.dumps(decisions, indent=2), encoding="utf-8")
+    kept = [entry for entry in load_library(settings) if not (entry["job"] == job_number and entry["name"] == check)]
+    (library_dir(settings) / "library.json").write_text(json.dumps(kept, indent=2), encoding="utf-8")
+
+
 def answer_question(settings, number, question_id, reply, who=""):
     """Record what the person said. A letter picks an option; anything else is taken as their own words."""
     job = job_dir(settings, number)
@@ -647,6 +695,11 @@ def answer_question(settings, number, question_id, reply, who=""):
     entry["said"] = f"{question['ask']} {pick['says'] if pick else reply}"
     if pick and "output" in pick:
         entry["output"] = pick["output"]
+    if pick and "retires" in pick:
+        decided = next(item for item in load_decisions(settings) if item["job"] == pick["retires"]
+                       and item.get("inputs") == question["inputs"])
+        retire(settings, pick["retires"], decided.get("check"), question["inputs"])
+        entry["said"] = f"Changed what {decided.get('who') or 'someone'} decided in job {pick['retires']}: {question['inputs']} now gives {pick['output']!r}."
     state.setdefault("answers", []).append(entry)
     state["readings"]["questions"] = [item for item in open_questions(state) if item["id"] != question_id]
     save_state(job, state)
@@ -761,7 +814,7 @@ def library_results(settings, state):
     for entry in load_library(settings):
         now = after[entry["file"]]
         row = {"file": entry["file"], "name": entry["name"], "says": entry["says"], "job": entry["job"],
-               "before": before.get(entry["file"]), "after": now["ok"]}
+               "before": before.get(entry["file"]), "after": now["ok"], "decided_by": entry.get("decided_by", "")}
         if not now["ok"] and (now.get("exhaustive") or {}).get("counterexample"):
             row["counterexample"] = now["exhaustive"]["counterexample"]
         results.append(row)
@@ -778,8 +831,10 @@ def add_to_library(settings, state, job):
             continue
         file = f"job{state['job']}_{check['name']}"
         (folder / file).write_bytes((job / "sealed" / check["name"]).read_bytes())
+        decided = sorted({entry["who"] for entry in state.get("answers") or []
+                          if entry.get("who") and entry.get("check") == check["name"]})
         entries.append({"file": file, "name": check["name"], "says": check["says"], "job": state["job"],
-                        "sha256": check["sha256"]})
+                        "sha256": check["sha256"], "decided_by": ", ".join(decided)})
         added.append(check["name"])
     (folder / "library.json").write_text(json.dumps(entries, indent=2), encoding="utf-8")
     return added
@@ -849,14 +904,14 @@ def relies_on(state):
     return out or ["nothing beyond the harness itself"]
 
 
-def begin(settings, request, correction=False):
+def begin(settings, request, correction=False, who=""):
     """Step 1: snapshot the workspace and run the test suite and the proven library before anything changes.
 
     A correction is a job like any other, so it can't end in an explanation: it needs a check that fails on the old
     behaviour, and once proven that check joins the library and binds every later job."""
     number, job = new_job(settings, request)
     state = load_state(job)
-    state["correction"] = correction
+    state.update(correction=correction, who=who)
     state["before"] = snapshot(settings)
     state["suite_before"] = run_suite(settings)
     state["library_before"] = run_library(settings)
@@ -886,6 +941,15 @@ def seal(settings, number):
     state.update(sealed_tree=tree, checks=checks, strays=[item["path"] for item in strays],
                  review=review_checks(settings, job, state["request"], sealed))
     state["readings"] = read_meaning(settings, job, state, sealed)
+    against = find_contradictions(settings, state, sealed)
+    if against:
+        state["readings"] = state["readings"] or {"ok": True, "mode": "compared", "statements": [], "conflicts": [],
+                                                  "failed": [], "dropped": [], "questions": []}
+        state["readings"]["questions"] = against + state["readings"].get("questions", [])
+    for question in open_questions(state):
+        form = readings.shape(next((source for name, source in sealed if name == question.get("check")), b"").decode(
+            "utf-8", "replace").lstrip("\ufeff"))
+        question["owner"] = question.get("owner") or (owner_of(settings, form["params"]) if form else "")
     save_state(job, state)
     return checks
 
@@ -918,10 +982,11 @@ def finish(settings, number, claim=""):
     if "library_before" in state:
         state["library_added"] = add_to_library(settings, state, job) if state["verdict"].startswith("DONE") else []
         state["assumptions"] = relies_on(state)
-        settled = [entry["said"] for entry in state.get("answers") or []]
-        settled += [f"Correction: {state['request']}"] if state.get("correction") else []
+        settled = [{key: entry[key] for key in ("said", "who", "check", "inputs", "output") if key in entry}
+                   for entry in state.get("answers") or []]
+        settled += [{"said": f"Correction: {state['request']}", "who": state.get("who", "")}] if state.get("correction") else []
         if state["verdict"].startswith("DONE") and settled:  # remembered, so nobody has to say it twice
-            decisions = load_decisions(settings) + [{"job": number, "said": line} for line in settled]
+            decisions = load_decisions(settings) + [{"job": number, **entry} for entry in settled]
             decisions_path(settings).parent.mkdir(parents=True, exist_ok=True)
             decisions_path(settings).write_text(json.dumps(decisions, indent=2), encoding="utf-8")
     ledger = settings.home / "ledger.jsonl"
@@ -1058,7 +1123,8 @@ def scan(state, lines, after_files):
             item("ok", f"{check['name']} holds with the code and expected() in separate processes ({again['rows']:,} inputs)")
     library = state.get("library")
     if library:
-        broken = [f"{e['name']} from job {e['job']}" for e in library if not e["after"] and e["before"] is not False]
+        broken = [f"{e['name']} from job {e['job']}" + (f" (decided by {e['decided_by']})" if e.get("decided_by") else "")
+                  for e in library if not e["after"] and e["before"] is not False]
         item("FAIL" if broken else "ok", f"broke requirements proven in earlier jobs: {', '.join(broken)}" if broken
              else f"none of the {len(library)} requirement(s) proven in earlier jobs was broken")
     for answer in state.get("answer_results") or []:
@@ -1203,6 +1269,7 @@ def main():
     begin_parser = commands.add_parser("begin", help="step 1, for an agent that runs the steps itself")
     begin_parser.add_argument("request")
     begin_parser.add_argument("--correction", action="store_true", help="the person is correcting a mistake")
+    begin_parser.add_argument("--who", default="", help="who asked")
     commands.add_parser("seal", help="step 3: seal and run the checks in proof_checks/").add_argument("job", type=int)
     finish_parser = commands.add_parser("finish", help="step 5: prove it and print the report")
     finish_parser.add_argument("job", type=int)
@@ -1244,7 +1311,7 @@ def main():
             ask = (lambda text: input(text + "\nYour answer (a letter, or say what you meant): ")) if sys.stdin.isatty() else None
             print(run_job(settings, args.request, print, ask, args.correction)[1])
         elif args.action == "begin":
-            number = begin(settings, args.request, args.correction)
+            number = begin(settings, args.request, args.correction, args.who)
             print(standing([entry["said"] for entry in load_decisions(settings)]).strip())
             print(CORRECTION.strip() if args.correction else "")
             print(f"job {number}")

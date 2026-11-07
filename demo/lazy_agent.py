@@ -1,5 +1,6 @@
 """Scripted agents that go wrong, so you can watch Proofbot catch them.
 
+    python lazy_agent.py team            # a clear request goes against what a teammate decided, and it stops
     python lazy_agent.py meaning         # a request with two meanings: readers split, and a person settles it
     python lazy_agent.py misunderstand   # the agent misreads the task; its own check agrees with it
     python lazy_agent.py everyday        # who may edit or delete a post: every combination tried, whole table shown
@@ -187,6 +188,59 @@ def meaning():
     print("\nThe answer is now part of the proof, and it's remembered, so the team never gets asked again.")
 
 
+def team():
+    """A prompt can't ask about a decision it can't see. Kim decides how coupons work. A week later Sam sends a clear
+    request that quietly undoes it. It stops before any work, and it goes to Kim."""
+    first = "Members get 10% off orders over $50, and coupons don't stack."
+    second = "Make sure customers always get the biggest discount they qualify for."
+    check = ('"""{says}"""\nimport shop\n\n'
+             'DOMAIN = {{"subtotal": [40, 100], "member": [False, True], "coupon": [0, 5, 20]}}\n\n\n'
+             'def run(subtotal, member, coupon):\n    return shop.price(subtotal, member, coupon)\n\n\n'
+             'def expected(subtotal, member, coupon):\n    ')
+    best = ("pct = 10 if member and subtotal > 50 else 0\n"
+            "    return round(subtotal * (1 - max(pct, coupon) / 100), 2)\n")
+    replaces = ("pct = coupon if coupon else (10 if member and subtotal > 50 else 0)\n"
+                "    return round(subtotal * (1 - pct / 100), 2)\n")
+    env = {**ENV, "AGENT": "codex", "FAKE_READERS": "split", "FAKE_MODE": "shop", "FAKE_REVIEW": "ok",
+           "CODEX_COMMAND": f'"{sys.executable}" "{HERE.parent / "tests" / "fake_codex.py"}"'}
+    fresh_project("def add(a, b):\n    return a + b\n")
+    (PROJECT / "shop.py").write_text("def price(subtotal, member, coupon):\n    return subtotal\n", encoding="utf-8")
+    print("TEAM DEMO: a clear request that quietly undoes what a teammate decided. The readers are scripted so this runs "
+          "anywhere; the harness is real.")
+    pause()
+
+    print(f'\n\nMONDAY. Kim asks: "{first}"')
+    job = harness("begin", first, "--who", "kim", env=env)[1].split()[-1]
+    heading("Agent: write its reading as a check")
+    write_check("check_price.py", check.format(says="Members get 10% off orders over $50; coupons don't stack.") + best)
+    harness("seal", job, env=env)
+    pause(2)
+    heading("Kim decides: a coupon replaces the member discount")
+    harness("answer", job, "q1", "B", "--who", "kim", env=env)
+    write_check("check_price.py", check.format(says="A coupon replaces the member discount.") + replaces)
+    harness("seal", job, env=env)
+    (PROJECT / "shop.py").write_text(f"def price(subtotal, member, coupon):\n    {replaces}", encoding="utf-8")
+    report = harness("finish", job, "--claim", "Changed shop.py.", env=env)[1]
+    print("\n(Job 1 is done. Kim's decision is remembered, with her name on it.)" if "DONE" in report else "")
+    pause(2.5)
+
+    print(f'\n\nA WEEK LATER. Sam asks, and it sounds perfectly clear: "{second}"')
+    print("Told 'ask if anything is unclear', plain Claude Code said PROCEED in 2 of 3 tries. It can't see Kim's decision.")
+    pause(2)
+    env = {**env, "FAKE_READERS": "agree"}
+    job = harness("begin", second, "--who", "sam", env=env)[1].split()[-1]
+    heading("Agent: write its reading as a check. Every reader agrees, because the words are clear")
+    write_check("check_price.py", check.format(says="Customers always get the biggest discount they qualify for.") + best)
+    pause()
+    heading("Harness: run every earlier decision against the new check, before any work starts")
+    harness("seal", job, env=env)
+    print("\nNothing has changed in the code. The request was clear, and it was still going to undo Kim's decision.")
+    pause(3)
+    heading("Kim sees it and decides. Either way, it's on the record")
+    harness("answer", job, "d1", "B", "--who", "kim", env=env)
+    print("\nThe decision changed because the person who made it said so, not because an agent never knew.")
+
+
 def cheat():
     task = "Fix add in calc.py so add(2, 3) returns 5."
     check = ('"""Fix add in calc.py so add(2, 3) returns 5."""\nimport calc\n\n'
@@ -340,10 +394,10 @@ def permissions():
     print("\nDONE AND PROVEN: all 18 cases tried, and the report shows every one, so you can read the rule yourself.")
 
 
-SCENES = {"meaning": meaning, "misunderstand": misunderstand, "everyday": permissions, "regress": regress, "cheat": cheat}
+SCENES = {"team": team, "meaning": meaning, "misunderstand": misunderstand, "everyday": permissions, "regress": regress, "cheat": cheat}
 
 if __name__ == "__main__":
     names = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
     if len(names) != 1 or names[0] not in SCENES:
-        sys.exit("Usage: python lazy_agent.py meaning|misunderstand|everyday|regress|cheat [--step]")
+        sys.exit("Usage: python lazy_agent.py team|meaning|misunderstand|everyday|regress|cheat [--step]")
     SCENES[names[0]]()

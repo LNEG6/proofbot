@@ -192,6 +192,7 @@ def shape(text):
         return None
     run = ast.get_source_segment(text, named["run"]) if "run" in named else ""
     return {"signature": f"def expected({ast.unparse(named['expected'].args)}):", "run": run,
+            "params": sorted(arg.arg for arg in named["expected"].args.args),
             "expected": ast.get_source_segment(text, named["expected"])}
 
 
@@ -339,7 +340,8 @@ def keep_to_budget(found, answered, limit=QUESTION_LIMIT):
 
 
 def question_text(question):
-    lines = [f"{question['id']}: {question['ask']}"]
+    owner = f" (for {question['owner']})" if question.get("owner") else ""
+    lines = [f"{question['id']}{owner}: {question['ask']}"]
     for option in question["options"]:
         lines.append(f"  {option['label']}: {option['says']}")
     return "\n".join(lines)

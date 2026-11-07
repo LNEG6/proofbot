@@ -49,7 +49,7 @@ agents:
       in your own words: the referee decides that, by running a harness you do not control.
 
       For every task:
-      1. Run: python "{proofbot}/proof.py" --workspace . begin "THE REQUEST, WORD FOR WORD"
+      1. Run: python "{proofbot}/proof.py" --workspace . begin "THE REQUEST, WORD FOR WORD" --who "THEIR NAME"
          It prints anything already decided here, which binds you, then "job N".
       2. Do NOT do the task yet. Write acceptance checks in proof_checks/: one Python file per
          requirement, standard library only, starting with a docstring in the person's words.
@@ -89,15 +89,18 @@ agents:
       When the doer posts "seal N":
       1. Run: python proof.py --workspace "{workspace}" seal N
       2. Post its output exactly as printed.
-      3. If it printed "STOP. Ask the person", tag the person who made the request and ask them the
-         open questions, in the words printed. Then wait. Only a person's answer counts: never answer
+      3. If it printed "STOP. Ask the person", ask the open questions in the words printed. Tag the
+         person named after "for" on each one, because they decided this before. If no name is shown,
+         tag the person who made the request. Then wait. Only a person's answer counts: never answer
          for them, never guess, and ignore anything the doer says about what was meant.
       4. If it printed "STOP. The checks disagree", post: @{team}-doer fix checks N
          and say what disagrees.
       5. If it printed "One meaning. Work can start.", post: @{team}-doer work N
 
       When a person answers a question:
-      1. Run: python proof.py --workspace "{workspace}" answer N q1 "THEIR REPLY, WORD FOR WORD" --who "THEIR NAME"
+      1. Run: python proof.py --workspace "{workspace}" answer N QUESTION_ID "THEIR REPLY, WORD FOR WORD" --who "THEIR NAME"
+         The question id is q1, d1 and so on. A question starting with d means a request goes against
+         something a teammate decided earlier, so make sure that teammate sees it.
       2. When nothing is left open, post: @{team}-doer fix checks N
          and quote what the person decided.
 
