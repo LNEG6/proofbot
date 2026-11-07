@@ -61,7 +61,10 @@ git clone https://github.com/qunatumstuff/proofbot
 ```
 
 4. In Switch Console, go to **Templates > Import template** and import `proofbot.template.yaml`. Pick your project folder, the proofbot folder and your chat app.
-5. In the room, ask for something: `@proof-doer Members get 10% off orders over $50, and coupons don't stack.`
+5. Let both agents run `python`. Switch's default auto mode may stop and ask a person before each command, which stalls the room. For a demo, allow it under each agent's settings, or set `auto_approve: true` on both agents in the template if you're happy for them to run without checks.
+6. In the room, ask for something: `@proof-doer Members get 10% off orders over $50, and coupons don't stack.`
+
+`seal` and `finish` can each take a few minutes. A whole job took about 13 minutes in testing.
 
 ## Try it without Switch
 
@@ -85,7 +88,7 @@ python proof.py run "Capitalize the customer's name on the invoice."
 
 ![Random paths from one sentence to the different things it could mean](docs/meaning-paths.png)
 
-A request is one sentence, but the person's meaning could be any of several. Asking a second AI doesn't help much, because AIs tend to make the same silent guess. In a small test, two models read five product requests separately and never disagreed on any of 215 inputs, including requests that really were ambiguous.
+A request is one sentence, but the person's meaning could be any of several. Two AIs that simply read it tend to make the same silent guess. In a small test, two models read five product requests separately and never disagreed on any of 215 inputs, including requests that really were ambiguous.
 
 So [readings.py](readings.py) spreads the readers apart on purpose, like sampling different paths through what you might have meant:
 
@@ -118,6 +121,12 @@ These are real runs. The check in each of the first four rows was written by han
 One whole job on Claude Code, start to finish, asked two questions, built the right thing, and ended DONE, READ THE WARNINGS because the test project had no test suite. It took about 13 minutes: each round of readers takes about a minute, and the agent's own work takes the rest.
 
 That's a handful of requests, not a benchmark, and the AI steps don't give the same answer every time.
+
+### Why not just tell the agent to ask?
+
+You should. We tested it on the seven requests above. Told only "if anything is unclear, ask", Claude Code asked good questions on all three ambiguous requests and said PROCEED on the other four, in seconds. Left alone, it picked a meaning silently on all three and said it hadn't run anything. So spotting ambiguity is the cheap part, and our readers are much slower than that one line.
+
+What a prompt can't do is make the answer stick. The agent can still get it wrong in code, say "done", and forget by the next session. The readers earn their keep because each option comes with an exact input and output, so your answer becomes a check. The code has to pass it in a process it can't tamper with, in this job and every later one.
 
 ### Three mistakes that shaped this
 
